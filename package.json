@@ -1,0 +1,29 @@
+{
+  "name": "guardian-pay",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Guardian Pay hackathon demo: PayPal sandbox authorize/capture/void with a verified webhook receiver. Sandbox demo, synthetic data.",
+  "license": "MIT",
+  "type": "module",
+  "engines": { "node": "20.x" },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "start": "node dist/server.js",
+    "dev": "tsx watch src/server.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --import tsx --test test/*.test.ts",
+    "spike": "tsx spike/run.ts",
+    "live-test": "tsx spike/live-webhook-test.ts"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.17.0",
+    "@types/pg": "^8.11.10",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3"
+  }
+}
