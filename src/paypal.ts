@@ -1,4 +1,5 @@
 export interface PayPalConfig { base: string; clientId: string; clientSecret: string; webhookId: string }
+export type ApiConfig = Pick<PayPalConfig, 'base' | 'clientId' | 'clientSecret'>
 
 /** Guard: this project is sandbox-only. */
 export function assertSandbox(base: string) {
@@ -7,7 +8,7 @@ export function assertSandbox(base: string) {
 }
 
 let cached: { token: string; exp: number } | null = null;
-async function accessToken(c: PayPalConfig, fetchImpl: typeof fetch) {
+export async function accessToken(c: ApiConfig, fetchImpl: typeof fetch = fetch) {
   if (cached && cached.exp > Date.now() + 30_000) return cached.token;
   const r = await fetchImpl(c.base + '/v1/oauth2/token', {
     method: 'POST',
@@ -38,3 +39,44 @@ export async function verifyWebhookSignature(c: PayPalConfig, headers: Headers, 
   if (!r.ok) return 'ERROR_' + r.status;
   return ((await r.json()) as { verification_status?: string }).verification_status ?? 'UNKNOWN';
 }
+
+// ---------------------------------------------------------------------------------------------
+// Thin REST client. Every money call REQUIRES a PayPal-Request-Id (see idempotency.ts).
+// Application code must not call the money methods directly: they are reached only through
+// GuardedPayPal in guard.ts (a unit test greps the source tree to enforce this).
+// ---------------------------------------------------------------------------------------------
+export interface PayPalResult { status: number; body: any }
+export interface Money { currency_code: string; value: string }
+
+export class PayPalClient {
+  constructor(private cfg: ApiConfig, private fetchImpl: typeof fetch = fetch) { assertSandbox(cfg.base); }
+
+  private async call(method: string, path: string, body?: unknown, requestId?: string): Promise<PayPalResult> {
+    const token = await accessToken(this.cfg, this.fetchImpl);
+    const headers: Record<string, string> = { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json', Prefer: 'return=representation' };
+    if (requestId) headers['PayPal-Request-Id'] = requestId;
+    const r = await this.fetchImpl(this.cfg.base + path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
+    const text = await r.text();
+    let json: any = {}; try { json = text ? JSON.parse(text) : {}; } catch { json = { raw: text.slice(0, 500) }; }
+    return { status: r.status, body: json };
+  }
+
+  // --- money calls: requestId is a required argument ---
+  createOrder(order: unknown, requestId: string) { return this.call('POST', '/v2/checkout/orders', order, need(requestId)); }
+  authorizeOrder(orderId: string, requestId: string) { return this.call('POST', `/v2/checkout/orders/${enc(orderId)}/authorize`, {}, need(requestId)); }
+  captureAuthorization(authId: string, body: { amount: Money; final_capture: boolean }, requestId: string) {
+    return this.call('POST', `/v2/payments/authorizations/${enc(authId)}/capture`, body, need(requestId)); }
+  voidAuthorization(authId: string, requestId: string) { return this.call('POST', `/v2/payments/authorizations/${enc(authId)}/void`, undefined, need(requestId)); }
+  reauthorizeAuthorization(authId: string, body: { amount: Money }, requestId: string) {
+    return this.call('POST', `/v2/payments/authorizations/${enc(authId)}/reauthorize`, body, need(requestId)); }
+
+  // --- reads (no money moves) ---
+  getAuthorization(authId: string) { return this.call('GET', `/v2/payments/authorizations/${enc(authId)}`); }
+  getOrder(orderId: string) { return this.call('GET', `/v2/checkout/orders/${enc(orderId)}`); }
+}
+const enc = encodeURIComponent;
+function need(id: string) { if (!id || typeof id !== 'string') throw new Error('PayPal-Request-Id is required on money calls'); return id; }
+
+/** definitive business failure (safe to bump the attempt number): 4xx except timeouts/rate limits */
+export const isDefinitiveFailure = (status: number) => status >= 400 && status < 500 && status !== 408 && status !== 429;
+export const paypalIssue = (b: any): string => b?.details?.[0]?.issue ?? b?.name ?? 'UNKNOWN';
