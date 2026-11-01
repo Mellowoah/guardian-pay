@@ -10,6 +10,7 @@ export class HttpError extends Error {
 export interface MilestoneRow {
   id: string; case_id: string; seq: number; title: string; amount: string; state: MilestoneState;
   proof_note: string | null; rejection_reason: string | null; currency: string; provider_user_id: number; family_user_id: number | null;
+  expected_form_type?: string | null; expected_document_type?: string | null;
 }
 export interface PaymentRow {
   id: string; milestone_id: string; amount: string; currency: string; paypal_order_id: string | null; approve_url: string | null;
@@ -35,6 +36,12 @@ export async function loadPayment(q: Pick<pg.PoolClient, 'query'>, milestoneId: 
   return rows[0] ?? null;
 }
 
+const DECIDED = ['captured', 'rejected', 'voided', 'expired'];
+/** Proof image bytes are deleted once a decision is made (the sha256 hash and the audit trail stay). */
+export async function purgeProofBytes(c: pg.PoolClient, milestoneId: string): Promise<void> {
+  await c.query('UPDATE proofs SET bytes = NULL, bytes_deleted_at = now() WHERE milestone_id = $1 AND bytes IS NOT NULL', [milestoneId]);
+}
+
 /** The only place milestone state changes. Rejects illegal transitions; writes exactly one audit_log row. */
 export async function transition(c: pg.PoolClient, m: MilestoneRow, to: MilestoneState, actor: string, detail: Record<string, unknown> = {},
   sets: Record<string, unknown> = {}): Promise<void> {
@@ -43,6 +50,7 @@ export async function transition(c: pg.PoolClient, m: MilestoneRow, to: Mileston
   const setSql = ['state = $2', 'updated_at = now()', ...cols.map((k, i) => `${k} = $${i + 3}`)].join(', ');
   await c.query(`UPDATE milestones SET ${setSql} WHERE id = $1`, [m.id, to, ...cols.map(k => sets[k])]);
   await audit(c, { actor, action: `milestone.${to}`, targetType: 'milestone', targetId: m.id, caseId: m.case_id, before: { state: m.state }, after: { state: to, ...detail } });
+  if (DECIDED.includes(to)) await purgeProofBytes(c, m.id);
   m.state = to;
 }
 
@@ -50,6 +58,7 @@ export async function transition(c: pg.PoolClient, m: MilestoneRow, to: Mileston
 export async function forceState(c: pg.PoolClient, m: MilestoneRow, to: MilestoneState, actor: string, reason: string): Promise<void> {
   await c.query('UPDATE milestones SET state = $2, updated_at = now() WHERE id = $1', [m.id, to]);
   await audit(c, { actor, action: 'reconcile.override', targetType: 'milestone', targetId: m.id, caseId: m.case_id, before: { state: m.state }, after: { state: to, reason } });
+  if (DECIDED.includes(to)) await purgeProofBytes(c, m.id);
   m.state = to;
 }
 

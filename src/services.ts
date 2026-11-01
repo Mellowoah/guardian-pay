@@ -1,7 +1,10 @@
 import type { Db } from './db.js';
 import { GuardedPayPal, GuardDenied, checkMandate, type Actor, type GuardCtx } from './guard.js';
 import { isDefinitiveFailure, paypalIssue, type PayPalResult } from './paypal.js';
+import { createHash } from 'node:crypto';
 import { audit } from './audit.js';
+import type { Verifier } from './verify/verifier.js';
+import { sniffImage } from './verify/extraction.js';
 import { clock, addDays } from './clock.js';
 import { HOLDING } from './state.js';
 import { HttpError, loadMilestone, loadPayment, transition, updatePayment, actorLabel, attemptOf, bumped, type MilestoneRow, type PaymentRow } from './repo.js';
@@ -11,7 +14,9 @@ const BUYERS = ['family', 'reviewer'];
 const SANDBOX_CARD = { number: '4111111111111111', expiry: '2030-12', security_code: '123', name: 'Demo Buyer (sandbox)',
   billing_address: { address_line_1: '123 Main St', admin_area_2: 'San Jose', admin_area_1: 'CA', postal_code: '95131', country_code: 'US' } };
 
-export interface ServiceOpts { publicBaseUrl: string; allowSandboxCard: boolean }
+export interface ServiceOpts { publicBaseUrl: string; allowSandboxCard: boolean; verifier?: Verifier }
+export const MAX_PROOF_BYTES = 5 * 1024 * 1024;
+const DOC_TYPES = ['receipt_notice', 'rfe_response', 'interview_notice'];
 
 const AMOUNT_RE = /^\d{1,5}(\.\d{1,2})?$/;
 const str = (v: unknown, max: number, field: string, required = true): string => {
@@ -32,24 +37,29 @@ export class Service {
     const items = ms.map((m: any, i: number) => {
       const amt = String(m?.amount ?? '');
       if (!AMOUNT_RE.test(amt) || Number(amt) <= 0 || Number(amt) > 10000) throw new HttpError(400, 'bad_request', `milestones[${i}].amount must be 0.01-10000.00`);
-      return { title: str(m?.title, 200, `milestones[${i}].title`), amount: Number(amt).toFixed(2) };
+      const form = m?.form_type == null ? null : String(m.form_type).trim();
+      if (form !== null && !/^[A-Za-z0-9 -]{1,20}$/.test(form)) throw new HttpError(400, 'bad_request', `milestones[${i}].form_type invalid`);
+      const doc = m?.document_type == null ? null : String(m.document_type);
+      if (doc !== null && !DOC_TYPES.includes(doc)) throw new HttpError(400, 'bad_request', `milestones[${i}].document_type must be one of ${DOC_TYPES.join(', ')}`);
+      return { title: str(m?.title, 200, `milestones[${i}].title`), amount: Number(amt).toFixed(2), form, doc };
     });
+    const beneficiary = str(body?.beneficiary_name, 120, 'beneficiary_name', false) || null; const caseType = str(body?.case_type, 60, 'case_type', false) || null;
     const familyName = typeof body?.family_username === 'string' ? body.family_username : 'family_demo';
     return this.db.tx(async c => {
       const prov = (await c.query('SELECT id FROM providers WHERE user_id = $1', [actor.userId])).rows[0];
       if (!prov) throw new HttpError(403, 'forbidden', 'no provider profile');
       const fam = (await c.query(`SELECT id FROM users WHERE username = $1 AND role = 'family'`, [familyName])).rows[0];
       if (!fam) throw new HttpError(400, 'bad_request', 'unknown family_username');
-      const cs = (await c.query('INSERT INTO cases (title, description, provider_id, family_user_id) VALUES ($1,$2,$3,$4) RETURNING *',
-        [title, description || null, prov.id, fam.id])).rows[0];
+      const cs = (await c.query('INSERT INTO cases (title, description, provider_id, family_user_id, beneficiary_name, case_type) VALUES ($1,$2,$3,$4,$5,$6) RETURNING *',
+        [title, description || null, prov.id, fam.id, beneficiary, caseType])).rows[0];
       await audit(c, { actor: actorLabel(actor), action: 'case.create', targetType: 'case', targetId: cs.id, caseId: cs.id, before: null, after: { title, milestones: items.length } });
       const out = [];
       for (let i = 0; i < items.length; i++) {
-        const m = (await c.query('INSERT INTO milestones (case_id, seq, title, amount) VALUES ($1,$2,$3,$4) RETURNING *', [cs.id, i + 1, items[i].title, items[i].amount])).rows[0];
+        const m = (await c.query('INSERT INTO milestones (case_id, seq, title, amount, expected_form_type, expected_document_type) VALUES ($1,$2,$3,$4,$5,$6) RETURNING *', [cs.id, i + 1, items[i].title, items[i].amount, items[i].form, items[i].doc])).rows[0];
         await audit(c, { actor: actorLabel(actor), action: 'milestone.created', targetType: 'milestone', targetId: m.id, caseId: cs.id, before: null, after: { state: 'created', amount: m.amount } });
         out.push(publicMilestone(m));
       }
-      return { id: cs.id, title: cs.title, currency: cs.currency, milestones: out };
+      return { id: cs.id, title: cs.title, currency: cs.currency, beneficiary_name: cs.beneficiary_name, case_type: cs.case_type, milestones: out };
     });
   }
 
@@ -66,7 +76,7 @@ export class Service {
     const cs = await this.assertCaseAccess(actor, caseId);
     const ms = (await this.db.query(
       `SELECT m.*, row_to_json(p) AS payment FROM milestones m LEFT JOIN payments p ON p.milestone_id = m.id WHERE m.case_id = $1 ORDER BY m.seq`, [caseId])).rows;
-    return { id: cs.id, title: cs.title, currency: cs.currency, milestones: ms.map(m => ({ ...publicMilestone(m), payment: m.payment ? publicPayment(m.payment) : null })) };
+    return { id: cs.id, title: cs.title, currency: cs.currency, beneficiary_name: cs.beneficiary_name, case_type: cs.case_type, milestones: ms.map(m => ({ ...publicMilestone(m), payment: m.payment ? publicPayment(m.payment) : null })) };
   }
 
   async getAudit(actor: Actor, caseId: string) {
@@ -169,15 +179,47 @@ export class Service {
   }
 
   // ------------------------------------------------------------------ proof / verify
-  async submitProof(actor: Actor, milestoneId: string, body: any) {
-    const note = str(body?.note, 2000, 'note');
-    return this.db.tx(async c => {
+  /** Provider uploads proof (JSON: {note?, filename?, file_base64?}). Stores bytes + sha256, moves to proof_submitted, starts the advisory AI check. */
+  async submitProof(actor: Actor, milestoneId: string, body: any): Promise<any> {
+    const note = str(body?.note, 2000, 'note', false);
+    let file: { bytes: Buffer; mime: string; sha: string; filename: string | null } | null = null;
+    if (body?.file_base64 != null) {
+      if (typeof body.file_base64 !== 'string') throw new HttpError(400, 'bad_request', 'file_base64 must be a string');
+      const b64 = body.file_base64.replace(/^data:[^;]+;base64,/, '');
+      if (b64.length > Math.ceil(MAX_PROOF_BYTES * 4 / 3) + 8) throw new HttpError(413, 'too_large', `proof image must be at most ${MAX_PROOF_BYTES} bytes`);
+      const bytes = Buffer.from(b64, 'base64');
+      if (!bytes.length || bytes.length > MAX_PROOF_BYTES) throw new HttpError(413, 'too_large', `proof image must be 1..${MAX_PROOF_BYTES} bytes`);
+      const mime = sniffImage(bytes);
+      if (!mime) throw new HttpError(415, 'unsupported_media_type', 'proof must be a PNG, JPEG or WebP image');
+      file = { bytes, mime, sha: createHash('sha256').update(bytes).digest('hex'), filename: typeof body.filename === 'string' ? body.filename.replace(/[^\w. -]/g, '_').slice(0, 100) : null };
+    }
+    if (!note && !file) throw new HttpError(400, 'bad_request', 'provide a note and/or file_base64');
+    const out = await this.db.tx(async c => {
       const m = await loadMilestone(c, milestoneId, true);
       if (actor.role !== 'provider' || actor.userId !== m.provider_user_id) throw new HttpError(403, 'forbidden', 'only the case provider can submit proof');
-      if (m.state === 'proof_submitted') return { milestone: publicMilestone(m), idempotent: true };
-      await transition(c, m, 'proof_submitted', actorLabel(actor), { note_length: note.length }, { proof_note: note, proof_submitted_at: clock.now() });
-      m.proof_note = note; return { milestone: publicMilestone(m) };
+      if (m.state === 'proof_submitted') return { milestone: publicMilestone(m), idempotent: true as const };
+      const text = note || `image proof uploaded${file?.filename ? ` (${file.filename})` : ''}`;
+      await transition(c, m, 'proof_submitted', actorLabel(actor), { note_length: text.length, proof_sha256: file?.sha ?? null }, { proof_note: text, proof_submitted_at: clock.now() });
+      m.proof_note = text;
+      if (!this.opts.verifier) return { milestone: publicMilestone(m) };
+      const sha = file?.sha ?? createHash('sha256').update(text).digest('hex');
+      const proof = (await c.query(`INSERT INTO proofs (milestone_id, uploaded_by, filename, content_type, size_bytes, sha256, has_image, bytes) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`,
+        [m.id, actor.userId, file?.filename ?? null, file?.mime ?? 'text/plain', file?.bytes.length ?? text.length, sha, !!file, file?.bytes ?? null])).rows[0];
+      const run = (await c.query(`INSERT INTO verification_runs (proof_id, milestone_id, provider) VALUES ($1,$2,$3) RETURNING id`, [proof.id, m.id, this.opts.verifier.provider])).rows[0];
+      return { milestone: publicMilestone(m), proof: { id: proof.id, sha256: sha, has_image: !!file, size_bytes: file?.bytes.length ?? text.length },
+        verification: { run_id: run.id, status: 'running', advisory_only: true } };
     }, milestoneId);
+    if ('verification' in out && out.verification && this.opts.verifier) this.opts.verifier.start(out.verification.run_id);
+    return out;
+  }
+
+  async verification(actor: Actor, milestoneId: string) {
+    const m = await loadMilestone(this.db.pool, milestoneId);
+    await this.assertCaseAccess(actor, m.case_id);
+    if (!this.opts.verifier) throw new HttpError(404, 'not_found', 'AI proof check is not enabled');
+    const v = await this.opts.verifier.latest(m.id);
+    if (!v) throw new HttpError(404, 'not_found', 'no proof has been submitted for this milestone');
+    return { milestone_id: m.id, milestone_state: m.state, ...v };
   }
 
   async verifyProof(actor: Actor, milestoneId: string, body: any) {
@@ -274,6 +316,7 @@ export class Service {
 
 export const HOLDING_STATES = HOLDING;
 export const publicMilestone = (m: any) => ({ id: m.id, case_id: m.case_id, seq: m.seq, title: m.title, amount: m.amount, state: m.state,
+  expected_form_type: m.expected_form_type ?? null, expected_document_type: m.expected_document_type ?? null,
   proof_note: m.proof_note ?? null, rejection_reason: m.rejection_reason ?? null });
 export const publicPayment = (p: any) => ({ id: p.id, status: p.status, amount: p.amount, currency: p.currency, order_id: p.paypal_order_id,
   original_authorization_id: p.original_authorization_id, current_authorization_id: p.current_authorization_id, authorized_at: p.authorized_at,

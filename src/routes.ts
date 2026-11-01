@@ -28,8 +28,10 @@ const wrap = (fn: express.RequestHandler): express.RequestHandler => (req, res, 
 
 export function buildApi(db: Db, svc: Service, guarded: GuardedPayPal): express.Router {
   const r = express.Router();
-  r.use(express.json({ limit: '100kb' }));
   r.use(wrap(demoAuth(db)));
+  // proof upload carries a base64 image (<= 5 MB): larger body limit on this route only, and only after auth
+  r.post('/milestones/:id/proof', express.json({ limit: '8mb' }), wrap(async (req, res) => { res.json(await svc.submitProof(a(req), req.params.id, req.body)); }));
+  r.use(express.json({ limit: '100kb' }));
   const a = (req: express.Request) => req.actor!;
 
   r.get('/me', (req, res) => { res.json(a(req)); });
@@ -45,7 +47,7 @@ export function buildApi(db: Db, svc: Service, guarded: GuardedPayPal): express.
   r.get('/cases/:id/audit', wrap(async (req, res) => { res.json(await svc.getAudit(a(req), req.params.id)); }));
   r.post('/milestones/:id/order', wrap(async (req, res) => { res.status(201).json(await svc.openOrder(a(req), req.params.id, req.body)); }));
   r.post('/milestones/:id/authorize', wrap(async (req, res) => { res.json(await svc.authorizeWallet(a(req), req.params.id)); }));
-  r.post('/milestones/:id/proof', wrap(async (req, res) => { res.json(await svc.submitProof(a(req), req.params.id, req.body)); }));
+  r.get('/milestones/:id/verification', wrap(async (req, res) => { res.json(await svc.verification(a(req), req.params.id)); }));
   r.post('/milestones/:id/verify', wrap(async (req, res) => { res.json(await svc.verifyProof(a(req), req.params.id, req.body)); }));
   r.post('/milestones/:id/approve', wrap(async (req, res) => { res.json(await svc.approve(a(req), req.params.id)); }));
   r.post('/milestones/:id/reject', wrap(async (req, res) => { res.json(await svc.reject(a(req), req.params.id, req.body)); }));
@@ -69,6 +71,7 @@ export function buildApi(db: Db, svc: Service, guarded: GuardedPayPal): express.
     if (err instanceof HttpError) { res.status(err.status).json({ error: err.code, message: err.message, ...err.extra }); return; }
     if (err instanceof GuardDenied) { res.status(403).json({ error: 'guard_denied', message: err.reason }); return; }
     if (err instanceof IllegalTransition) { res.status(409).json({ error: 'illegal_transition', message: err.message }); return; }
+    if (err?.type === 'entity.too.large') { res.status(413).json({ error: 'too_large' }); return; }
     if (err?.type === 'entity.parse.failed') { res.status(400).json({ error: 'bad_json' }); return; }
     console.error('api error', err?.message ?? err); res.status(500).json({ error: 'internal' });
   }) as express.ErrorRequestHandler);

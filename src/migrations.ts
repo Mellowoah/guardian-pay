@@ -125,6 +125,42 @@ export const MIGRATIONS: { id: string; sql: string }[] = [
     INSERT INTO providers (user_id, business_name)
       SELECT id, CASE username WHEN 'provider_demo' THEN 'Sunrise Home Care (synthetic)' ELSE 'Maple Legal Support (synthetic)' END
       FROM users WHERE role='provider' ON CONFLICT (user_id) DO NOTHING;` },
+  { id: '004_proofs_verification', sql: `
+    ALTER TABLE cases ADD COLUMN beneficiary_name TEXT;
+    ALTER TABLE cases ADD COLUMN case_type TEXT;
+    ALTER TABLE milestones ADD COLUMN expected_form_type TEXT;
+    ALTER TABLE milestones ADD COLUMN expected_document_type TEXT CHECK (expected_document_type IN ('receipt_notice','rfe_response','interview_notice'));
+    CREATE TABLE proofs (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      milestone_id UUID NOT NULL REFERENCES milestones(id),
+      uploaded_by INT NOT NULL REFERENCES users(id),
+      filename TEXT,
+      content_type TEXT NOT NULL,
+      size_bytes INT NOT NULL,
+      sha256 TEXT NOT NULL,
+      has_image BOOLEAN NOT NULL DEFAULT false,
+      bytes BYTEA,
+      bytes_deleted_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    CREATE INDEX proofs_milestone ON proofs (milestone_id);
+    CREATE TABLE verification_runs (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      proof_id UUID NOT NULL REFERENCES proofs(id),
+      milestone_id UUID NOT NULL REFERENCES milestones(id),
+      status TEXT NOT NULL DEFAULT 'running' CHECK (status IN ('running','completed')),
+      provider TEXT,
+      attempts INT NOT NULL DEFAULT 0,
+      extraction JSONB,
+      checks JSONB,
+      score NUMERIC(4,3),
+      recommendation TEXT CHECK (recommendation IN ('recommend_approve','needs_human_review','recommend_reject')),
+      explanation JSONB,
+      error TEXT,
+      started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      finished_at TIMESTAMPTZ
+    );
+    CREATE INDEX verification_milestone ON verification_runs (milestone_id, started_at DESC);` },
 ];
 
 export async function migrate(db: Db): Promise<string[]> {
