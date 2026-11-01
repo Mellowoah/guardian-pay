@@ -22,7 +22,7 @@ export function createApp({ store, verify }: AppDeps) {
     if (!event.id || !event.event_type) { res.status(400).json({ error: 'missing id/event_type' }); return; }
     let status: string;
     try { status = await verify(req.headers, raw); }
-    catch (e) { console.error('verify error', (e as Error).message); res.status(502).json({ error: 'verification unavailable' }); return; }
+    catch (e) { console.error('verify error', (e as Error).message); res.status(502).json({ error: 'verification unavailable', reason: (e as Error).message }); return; }
     console.log(`webhook ${event.event_type} ${event.id} verification_status=${status}`);
     if (status !== 'SUCCESS') { res.status(400).json({ error: 'signature verification failed', verification_status: status }); return; }
     const inserted = await store.insert({ id: event.id, type: event.event_type, verified: true, payload: event });
