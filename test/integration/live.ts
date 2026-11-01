@@ -58,8 +58,8 @@ async function main() {
 
   // proof for A is a SYNTHETIC image upload (starts the advisory AI check); B and C use a plain note
   const img = readFileSync(new URL('../fixtures/proofs/good_receipt_notice.png', import.meta.url));
-  const up = await api('provider_demo', 'POST', `/api/milestones/${A}/proof`, { filename: 'good_receipt_notice.png', file_base64: img.toString('base64') });
-  check('proof image upload -> proof_submitted, check started, sha256 stored', up.status === 200 && up.json.milestone?.state === 'proof_submitted' && /^[0-9a-f]{64}$/.test(up.json.proof?.sha256 ?? ''), `sha256 ${String(up.json.proof?.sha256).slice(0, 12)}…`);
+  const upl = await api('provider_demo', 'POST', `/api/milestones/${A}/proof`, { filename: 'good_receipt_notice.png', file_base64: img.toString('base64') });
+  check('proof image upload -> proof_submitted, check started, sha256 stored', upl.status === 200 && upl.json.milestone?.state === 'proof_submitted' && /^[0-9a-f]{64}$/.test(upl.json.proof?.sha256 ?? ''), `sha256 ${String(upl.json.proof?.sha256).slice(0, 12)}…`);
   for (const id of [B, C]) await api('provider_demo', 'POST', `/api/milestones/${id}/proof`, { note: 'synthetic photos attached' });
   const ver = await waitFor(async () => { const v = await api('family_demo', 'GET', `/api/milestones/${A}/verification`); return v.json.status === 'completed' ? v : undefined; }, 90_000, 2000);
   const vj = ver?.json;
