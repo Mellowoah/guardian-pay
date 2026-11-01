@@ -92,7 +92,7 @@ export class Service {
     }, m.id);
   }
 
-  async openOrder(actor: Actor, milestoneId: string, body: any) {
+  async openOrder(actor: Actor, milestoneId: string, body: any): Promise<any> {
     const useCard = body?.payment_source === 'card';
     if (useCard && !this.opts.allowSandboxCard) throw new HttpError(400, 'bad_request', 'sandbox card disabled');
     if (body?.payment_source && !['card', 'paypal'].includes(body.payment_source)) throw new HttpError(400, 'bad_request', 'payment_source must be card or paypal');
@@ -135,7 +135,7 @@ export class Service {
     }, m.id);
   }
 
-  async authorizeWallet(actor: Actor, milestoneId: string) {
+  async authorizeWallet(actor: Actor, milestoneId: string): Promise<any> {
     const pre = await this.db.tx(async c => {
       const m = await loadMilestone(c, milestoneId, true); const p = await loadPayment(c, m.id);
       if (!BUYERS.includes(actor.role)) throw new HttpError(403, 'forbidden', `role ${actor.role} may not authorize`);
@@ -192,7 +192,7 @@ export class Service {
   }
 
   // ------------------------------------------------------------------ approve -> capture
-  async approve(actor: Actor, milestoneId: string) {
+  async approve(actor: Actor, milestoneId: string): Promise<any> {
     const pre = await this.db.tx(async c => {
       const m = await loadMilestone(c, milestoneId, true); const p = await loadPayment(c, m.id);
       if (!BUYERS.includes(actor.role)) throw new HttpError(403, 'forbidden', `role ${actor.role} may not approve`);
@@ -238,7 +238,7 @@ export class Service {
   }
 
   // ------------------------------------------------------------------ reject -> void
-  async reject(actor: Actor, milestoneId: string, body: any) {
+  async reject(actor: Actor, milestoneId: string, body: any): Promise<any> {
     const reason = str(body?.reason, 500, 'reason');
     const pre = await this.db.tx(async c => {
       const m = await loadMilestone(c, milestoneId, true); const p = await loadPayment(c, m.id);
