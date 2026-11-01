@@ -3,6 +3,7 @@
  *   BASE_URL=https://guardian-pay.onrender.com PAYPAL_CLIENT_ID=... PAYPAL_CLIENT_SECRET=... npm run integration
  * Synthetic data only. Never prints credentials. Resets the demo clock offset to 0 when done.
  */
+import { readFileSync } from 'node:fs';
 import { accessToken, assertSandbox } from '../../src/paypal.js';
 
 const BASE = (process.env.BASE_URL ?? 'https://guardian-pay.onrender.com').replace(/\/$/, '');
@@ -55,7 +56,16 @@ async function main() {
   const wallet = await api('family_demo', 'POST', `/api/milestones/${(await api('provider_demo', 'POST', '/api/cases', { title: 'wallet link check (synthetic)', milestones: [{ title: 'w', amount: '1.00' }] })).json.milestones[0].id}/order`, { payment_source: 'paypal' });
   check('wallet path returns a PayPal approve link', wallet.status === 201 && /paypal\.com/.test(wallet.json.approve_url ?? ''), String(wallet.json.approve_url ?? '').split('?')[0]);
 
-  for (const id of [A, B, C]) await api('provider_demo', 'POST', `/api/milestones/${id}/proof`, { note: 'synthetic photos attached' });
+  // proof for A is a SYNTHETIC image upload (starts the advisory AI check); B and C use a plain note
+  const img = readFileSync(new URL('../fixtures/proofs/good_receipt_notice.png', import.meta.url));
+  const up = await api('provider_demo', 'POST', `/api/milestones/${A}/proof`, { filename: 'good_receipt_notice.png', file_base64: img.toString('base64') });
+  check('proof image upload -> proof_submitted, check started, sha256 stored', up.status === 200 && up.json.milestone?.state === 'proof_submitted' && /^[0-9a-f]{64}$/.test(up.json.proof?.sha256 ?? ''), `sha256 ${String(up.json.proof?.sha256).slice(0, 12)}…`);
+  for (const id of [B, C]) await api('provider_demo', 'POST', `/api/milestones/${id}/proof`, { note: 'synthetic photos attached' });
+  const ver = await waitFor(async () => { const v = await api('family_demo', 'GET', `/api/milestones/${A}/verification`); return v.json.status === 'completed' ? v : undefined; }, 90_000, 2000);
+  const vj = ver?.json;
+  check('AI proof check completed: 6 bilingual checks, advisory only', !!vj && vj.checks?.length === 6 && vj.checks.every((c: any) => c.reason_en && c.reason_es) && vj.advisory_only === true && vj.human_approval_required === true,
+    `provider ${vj?.provider}, recommendation ${vj?.recommendation}, score ${vj?.score}`);
+  check('AI check never auto-approves (milestone still proof_submitted)', (await api('reviewer_demo', 'GET', `/api/cases/${caseId}`)).json.milestones.find((m: any) => m.id === A)?.state === 'proof_submitted');
 
   // ---- negatives
   check('provider approving its own milestone -> 403', (await api('provider_demo', 'POST', `/api/milestones/${A}/approve`)).status === 403);
