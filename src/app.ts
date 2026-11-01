@@ -6,9 +6,13 @@ export interface AppDeps {
   store: EventStore;
   /** returns PayPal verification_status ("SUCCESS" | "FAILURE" | ...); undefined verifier = webhook id not configured */
   verify?: (headers: Headers, rawBody: string) => Promise<string>;
+  /** called after a NEW verified event is stored (reconciliation); failures never fail the webhook response */
+  onEvent?: (eventId: string, eventType: string) => Promise<void>;
+  /** mounts the /api router (needs a database) */
+  api?: import('express').Router;
 }
 
-export function createApp({ store, verify }: AppDeps) {
+export function createApp({ store, verify, onEvent, api }: AppDeps) {
   const app = express();
   app.disable('x-powered-by');
 
@@ -27,6 +31,7 @@ export function createApp({ store, verify }: AppDeps) {
     if (status !== 'SUCCESS') { res.status(400).json({ error: 'signature verification failed', verification_status: status }); return; }
     const inserted = await store.insert({ id: event.id, type: event.event_type, verified: true, payload: event });
     console.log(`webhook ${event.id} ${inserted ? 'stored' : 'duplicate (ignored)'}`);
+    if (inserted && onEvent) { try { await onEvent(event.id, event.event_type); } catch (e) { console.error('reconcile failed (will retry)', event.id, (e as Error).message); } }
     res.status(200).json({ received: true, duplicate: !inserted });
   });
 
@@ -35,5 +40,8 @@ export function createApp({ store, verify }: AppDeps) {
     const rows = await store.recent(50);
     res.json({ store: store.kind, events: rows.map(r => ({ type: r.event_type, id: r.paypal_event_id, verified: r.verified, received_at: r.received_at })) });
   });
+  if (api) app.use('/api', api);
+  app.get('/paypal/return', (_req, res) => { res.type('text').send('Approved in the PayPal sandbox. You can close this tab and call POST /api/milestones/:id/authorize.'); });
+  app.get('/paypal/cancel', (_req, res) => { res.type('text').send('Cancelled in the PayPal sandbox.'); });
   return app;
 }

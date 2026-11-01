@@ -1,4 +1,4 @@
-import pg from 'pg';
+import type { Db } from './db.js';
 
 export interface StoredEvent { paypal_event_id: string; event_type: string; verified: boolean; received_at: string }
 export interface EventStore {
@@ -21,31 +21,16 @@ export class MemoryStore implements EventStore {
 
 export class PgStore implements EventStore {
   kind = 'postgres' as const;
-  private pool: pg.Pool;
-  constructor(url: string) {
-    // Render internal URLs need no TLS; external (*.render.com) URLs do.
-    const ssl = /\.render\.com/.test(url) ? { rejectUnauthorized: false } : undefined;
-    this.pool = new pg.Pool({ connectionString: url, ssl, max: 5 });
-  }
-  async init() {
-    await this.pool.query(`CREATE TABLE IF NOT EXISTS webhook_events (
-      id BIGSERIAL PRIMARY KEY,
-      paypal_event_id TEXT NOT NULL UNIQUE,
-      event_type TEXT NOT NULL,
-      verified BOOLEAN NOT NULL,
-      payload JSONB NOT NULL,
-      received_at TIMESTAMPTZ NOT NULL DEFAULT now()
-    )`);
-  }
+  constructor(private db: Db) {}
   async insert(e: { id: string; type: string; verified: boolean; payload: unknown }) {
-    const r = await this.pool.query(
+    const r = await this.db.query(
       `INSERT INTO webhook_events (paypal_event_id, event_type, verified, payload) VALUES ($1,$2,$3,$4)
        ON CONFLICT (paypal_event_id) DO NOTHING`, [e.id, e.type, e.verified, JSON.stringify(e.payload)]);
     return (r.rowCount ?? 0) === 1;
   }
   async recent(limit: number) {
-    const r = await this.pool.query(
+    const r = await this.db.query(
       `SELECT paypal_event_id, event_type, verified, received_at FROM webhook_events ORDER BY id DESC LIMIT $1`, [limit]);
-    return r.rows.map(x => ({ ...x, received_at: new Date(x.received_at).toISOString() }));
+    return r.rows.map((x: any) => ({ ...x, received_at: new Date(x.received_at).toISOString() }));
   }
 }
