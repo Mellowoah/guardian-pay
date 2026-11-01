@@ -1,0 +1,77 @@
+{
+  "now": "2026-11-01T12:00:00Z",
+  "fixtures": [
+    {
+      "file": "good_receipt_notice.png",
+      "label": "good: receipt notice",
+      "expected_recommendation": "recommend_approve",
+      "expected_score": 1.0,
+      "context": {
+        "case_created_at": "2026-01-15",
+        "beneficiary_name": "Mateo Reyes",
+        "expected_form_type": "I-130",
+        "expected_document_type": "receipt_notice"
+      }
+    },
+    {
+      "file": "good_rfe_response.png",
+      "label": "good: RFE response (middle name present)",
+      "expected_recommendation": "recommend_approve",
+      "expected_score": 1.0,
+      "context": {
+        "case_created_at": "2026-01-15",
+        "beneficiary_name": "Mateo Reyes",
+        "expected_form_type": "I-130",
+        "expected_document_type": "rfe_response"
+      }
+    },
+    {
+      "file": "good_interview_notice.png",
+      "label": "good: interview notice",
+      "expected_recommendation": "recommend_approve",
+      "expected_score": 1.0,
+      "context": {
+        "case_created_at": "2026-01-15",
+        "beneficiary_name": "Mateo Reyes",
+        "expected_form_type": "I-130",
+        "expected_document_type": "interview_notice"
+      }
+    },
+    {
+      "file": "forged_blatant.png",
+      "label": "forged: bad receipt format, wrong form, future date, name mismatch",
+      "expected_recommendation": "recommend_reject",
+      "expected_score": 0.25,
+      "context": {
+        "case_created_at": "2026-01-15",
+        "beneficiary_name": "Mateo Reyes",
+        "expected_form_type": "I-130",
+        "expected_document_type": "receipt_notice"
+      }
+    },
+    {
+      "file": "forged_subtle.png",
+      "label": "forged: everything valid except the beneficiary name",
+      "expected_recommendation": "needs_human_review",
+      "expected_score": 0.8,
+      "context": {
+        "case_created_at": "2026-01-15",
+        "beneficiary_name": "Mateo Reyes",
+        "expected_form_type": "I-130",
+        "expected_document_type": "receipt_notice"
+      }
+    },
+    {
+      "file": "blurry.png",
+      "label": "blurry: unreadable fields, low confidence",
+      "expected_recommendation": "needs_human_review",
+      "expected_score": 0.5,
+      "context": {
+        "case_created_at": "2026-01-15",
+        "beneficiary_name": "Mateo Reyes",
+        "expected_form_type": "I-130",
+        "expected_document_type": "receipt_notice"
+      }
+    }
+  ]
+}

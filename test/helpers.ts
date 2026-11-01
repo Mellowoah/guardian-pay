@@ -5,6 +5,8 @@ import { migrate } from '../src/migrations.js';
 import { PayPalClient } from '../src/paypal.js';
 import { GuardedPayPal, type Actor } from '../src/guard.js';
 import { Service } from '../src/services.js';
+import { Verifier } from '../src/verify/verifier.js';
+import type { Extractor } from '../src/verify/extraction.js';
 
 export const TEST_URL = process.env.DATABASE_URL_TEST;
 
@@ -69,17 +71,18 @@ export class FakePayPal {
 }
 const res = (status: number, body: unknown) => ({ ok: status < 300, status, json: async () => body, text: async () => JSON.stringify(body) }) as unknown as Response;
 
-export interface Env { db: Db; fake: FakePayPal; svc: Service; guarded: GuardedPayPal; family: Actor; provider: Actor; provider2: Actor; reviewer: Actor; close(): Promise<void> }
-export async function setup(): Promise<Env> {
+export interface Env { verifier?: Verifier; db: Db; fake: FakePayPal; svc: Service; guarded: GuardedPayPal; family: Actor; provider: Actor; provider2: Actor; reviewer: Actor; close(): Promise<void> }
+export async function setup(extractor?: Extractor): Promise<Env> {
   const schema = 't_' + randomUUID().replace(/-/g, '').slice(0, 12);
   const admin = new pg.Client({ connectionString: TEST_URL }); await admin.connect(); await admin.query(`CREATE SCHEMA ${schema}`); await admin.end();
   const db = connect(`${TEST_URL}${TEST_URL!.includes('?') ? '&' : '?'}options=-c%20search_path%3D${schema}`);
   await migrate(db);
   const fake = new FakePayPal();
   const guarded = new GuardedPayPal(new PayPalClient({ base: 'https://api-m.sandbox.paypal.com', clientId: 'x', clientSecret: 'y' }, fake.fetch), db);
-  const svc = new Service(db, guarded, { publicBaseUrl: 'http://localhost', allowSandboxCard: true });
+  const verifier = extractor ? new Verifier(db, extractor, { retryDelayMs: 5 }) : undefined;
+  const svc = new Service(db, guarded, { publicBaseUrl: 'http://localhost', allowSandboxCard: true, verifier });
   const u = async (name: string): Promise<Actor> => { const r = (await db.query('SELECT id, role FROM users WHERE username = $1', [name])).rows[0]; return { userId: r.id, role: r.role, label: name }; };
-  return { db, fake, svc, guarded, family: await u('family_demo'), provider: await u('provider_demo'), provider2: await u('provider_two'), reviewer: await u('reviewer_demo'),
+  return { verifier, db, fake, svc, guarded, family: await u('family_demo'), provider: await u('provider_demo'), provider2: await u('provider_two'), reviewer: await u('reviewer_demo'),
     async close() { await db.close(); const a = new pg.Client({ connectionString: TEST_URL }); await a.connect(); await a.query(`DROP SCHEMA ${schema} CASCADE`); await a.end(); } };
 }
 export async function newCase(e: Env, amounts = ['25.00']) {
