@@ -39,8 +39,8 @@ async function main() {
   check('API + demo auth live', me.status === 200, `clock offset ${me.json.offset_days}`);
   await api('reviewer_demo', 'POST', '/api/admin/clock', { offset_days: 0 });
 
-  const created = await api('provider_demo', 'POST', '/api/cases', { title: 'Integration test: kitchen repair (synthetic)',
-    milestones: [{ title: 'Happy path', amount: '20.00' }, { title: 'Reject path', amount: '15.00' }, { title: 'Lifecycle path', amount: '10.00' }] });
+  const created = await api('provider_demo', 'POST', '/api/cases', { title: 'Integration test: kitchen repair (synthetic)', beneficiary_name: 'Mateo Reyes', case_type: 'Family petition (synthetic)',
+    milestones: [{ title: 'Happy path', amount: '20.00', form_type: 'I-130', document_type: 'receipt_notice' }, { title: 'Reject path', amount: '15.00' }, { title: 'Lifecycle path', amount: '10.00' }] });
   if (!check('provider creates case with 3 milestones', created.status === 201, `case ${created.json.id}`)) return;
   const caseId: string = created.json.id; const [A, B, C] = created.json.milestones.map((m: any) => m.id as string);
 
@@ -65,6 +65,11 @@ async function main() {
   const vj = ver?.json;
   check('AI proof check completed: 6 bilingual checks, advisory only', !!vj && vj.checks?.length === 6 && vj.checks.every((c: any) => c.reason_en && c.reason_es) && vj.advisory_only === true && vj.human_approval_required === true,
     `provider ${vj?.provider}, recommendation ${vj?.recommendation}, score ${vj?.score}`);
+  if (vj && !String(vj.provider).startsWith('none')) {
+    const st = Object.fromEntries((vj.checks ?? []).map((c: any) => [c.id, c.status]));
+    check('real AI extraction worked on live (not all not_run, no error, fields read)', !vj.error && !!vj.extraction?.receipt_number && vj.checks.some((c: any) => c.status !== 'not_run') && st.receipt_format === 'pass' && st.form_type_match === 'pass' && st.beneficiary_match === 'pass' && st.document_type_match === 'pass',
+      `attempts ${vj.attempts}, error ${String(vj.error).slice(0, 80)}, ${Object.entries(st).map(([k, v]) => `${k}=${v}`).join(' ')}`);
+  }
   check('AI check never auto-approves (milestone still proof_submitted)', (await api('reviewer_demo', 'GET', `/api/cases/${caseId}`)).json.milestones.find((m: any) => m.id === A)?.state === 'proof_submitted');
 
   // ---- negatives
