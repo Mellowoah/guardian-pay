@@ -148,3 +148,17 @@ test('fixtures: every proof image is marked SYNTHETIC and the eval manifest matc
   }
   assert.deepEqual(counts, { recommend_approve: 3, recommend_reject: 1, needs_human_review: 2 });
 });
+
+test('untrusted extraction: values read from a blurry/low-confidence image are NOT checked (a model can invent plausible text), human review; never approve or reject', () => {
+  const hallucinated: Extraction = { form_type: 'I-797', receipt_number: 'LIN0000000000', notice_date: '2023-11-14', beneficiary_name: 'John Doe', document_type: 'receipt_notice', case_type: null, legibility: 'blurry', confidence: 0.4 };
+  const r = runChecks(hallucinated, ctx);
+  assert.deepEqual(r.map(c => c.status), ['not_run', 'not_run', 'not_run', 'not_run', 'not_run', 'not_run']);
+  assert.ok(r.every(c => c.reason_en && c.reason_es));
+  assert.equal(recommend(r), 'needs_human_review'); assert.equal(scoreOf(r), 0.5);
+  // a clear image with low confidence is also untrusted; a clear confident one is checked normally
+  assert.ok(runChecks({ ...hallucinated, legibility: 'clear', confidence: 0.59 }, ctx).every(c => c.status === 'not_run'));
+  assert.ok(runChecks({ ...hallucinated, legibility: 'clear', confidence: 0.9 }, ctx).some(c => c.status === 'fail'));
+  // unreadable: legibility fails, the rest are not run -> still human review (incomplete evidence is never a reject)
+  const u = runChecks({ ...hallucinated, legibility: 'unreadable', confidence: 0.1 }, ctx);
+  assert.equal(u.find(c => c.id === 'legibility')!.status, 'fail'); assert.equal(recommend(u), 'needs_human_review');
+});

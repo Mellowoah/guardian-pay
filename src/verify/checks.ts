@@ -117,8 +117,18 @@ export const CHECKS: Record<CheckId, (x: Extraction | null, c: CheckContext) => 
 
 export const CHECK_ORDER: CheckId[] = ['receipt_format', 'form_type_match', 'notice_date_valid', 'beneficiary_match', 'document_type_match', 'legibility'];
 
+/** Values read from an image the model itself calls blurry/unreadable or is not confident about are not trustworthy (vision models can invent
+ *  plausible text for smudged images), so the content checks are NOT RUN on them; the legibility check carries the verdict and a human looks. */
+export const untrustedExtraction = (x: Extraction | null): boolean => !!x && (x.legibility !== 'clear' || x.confidence < MIN_CONFIDENCE);
+
 export function runChecks(x: Extraction | null, c: CheckContext): CheckResult[] {
-  return CHECK_ORDER.map(id => ({ id, label_en: LABELS[id][0], label_es: LABELS[id][1], weight: WEIGHTS[id], ...CHECKS[id](x, c) }));
+  const untrusted = untrustedExtraction(x);
+  return CHECK_ORDER.map(id => {
+    const r = untrusted && id !== 'legibility'
+      ? notRun('The image is not clear enough to trust the text read from it, so this check was not run.', 'La imagen no es lo bastante clara para confiar en el texto leído, por lo que esta verificación no se ejecutó.')
+      : CHECKS[id](x, c);
+    return { id, label_en: LABELS[id][0], label_es: LABELS[id][1], weight: WEIGHTS[id], ...r };
+  });
 }
 
 /** pass = full weight, not_run = half weight (unsure), fail = 0. Integer math so thresholds are exact. */
