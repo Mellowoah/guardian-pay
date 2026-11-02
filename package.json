@@ -14,6 +14,7 @@
     "test": "node --import tsx --test test/*.test.ts",
     "spike": "tsx spike/run.ts",
     "eval": "tsx scripts/eval.ts",
+    "seed-tokens": "tsx scripts/seed-tokens.ts",
     "integration": "tsx test/integration/live.ts",
     "live-test": "tsx spike/live-webhook-test.ts"
   },
