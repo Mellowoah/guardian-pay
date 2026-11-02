@@ -8,3 +8,4 @@ spike/cloudflared
 spike/results.json
 *.log
 .demo-tokens.env
+demo_login_links*.txt

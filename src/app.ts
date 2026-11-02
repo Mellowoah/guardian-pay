@@ -13,10 +13,12 @@ export interface AppDeps {
   /** public, unauthenticated payee verification (GET /api/verify-payee/:providerId); mounted before the authenticated /api router */
   publicApi?: import('express').Router;
   /** admin surface (only when ENABLE_ADMIN_ROUTES=true): `gate` is the admin-token check; `router` is mounted at /api/admin */
+  /** serves the thin web UI (static files) from this directory, plus GET /api/config (public: the sandbox PayPal client id is public by design) */
+  ui?: { dir: string; paypalClientId?: string };
   admin?: { gate: import('express').RequestHandler; router?: import('express').Router };
 }
 
-export function createApp({ store, verify, onEvent, api, admin, publicApi }: AppDeps) {
+export function createApp({ store, verify, onEvent, api, admin, publicApi, ui }: AppDeps) {
   const app = express();
   app.disable('x-powered-by');
   app.set('trust proxy', 1);
@@ -47,6 +49,18 @@ export function createApp({ store, verify, onEvent, api, admin, publicApi }: App
       res.json({ store: store.kind, events: rows.map(r => ({ type: r.event_type, id: r.paypal_event_id, verified: r.verified, received_at: r.received_at })) });
     });
     if (admin.router) app.use('/api/admin', admin.router);
+  }
+  if (ui) {
+    app.get('/api/config', (_req, res) => { res.set('Cache-Control', 'no-store').json({ paypal_client_id: ui.paypalClientId ?? null, paypal_env: 'sandbox', currency: 'USD', intent: 'authorize' }); });
+    // UI-only headers (the API stays plain JSON): scripts only from us + PayPal, no framing, no inline script
+    app.use((req, res, next) => {
+      if (req.method === 'GET' && !req.path.startsWith('/api/') && !req.path.startsWith('/webhooks') && req.path !== '/health') {
+        res.set({ 'Content-Security-Policy': "default-src 'self'; script-src 'self' https://*.paypal.com https://*.paypalobjects.com 'sha256-xiaD0XEAtT7Da8WrcQjkQbhOx0ZR6pjMSRZNsqZuFdA='; frame-src https://*.paypal.com; connect-src 'self' https://*.paypal.com https://*.paypalobjects.com; img-src 'self' data: blob: https:; style-src 'self' 'unsafe-inline'; font-src 'self' data: https:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
+          'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer' });
+      }
+      next();
+    });
+    app.use(express.static(ui.dir, { index: 'index.html', maxAge: 0, etag: true }));
   }
   if (publicApi) app.use('/api/verify-payee', publicApi);
   if (api) app.use('/api', api);

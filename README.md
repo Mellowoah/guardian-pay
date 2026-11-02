@@ -2,7 +2,7 @@
 
 Guardian Pay is the trust layer that lets AI-driven commerce scale safely on PayPal. **The AI suggests, a human decides, PayPal moves the money.** No code path captures funds without a recorded human approval.
 
-Hackathon demo on the PayPal **sandbox**: milestone-based payments (funds are authorized up front and captured only after a human approves, to a payee that passed PayPal's checks and the public practitioner lists) built on Orders v2 `intent=AUTHORIZE`, with a guard module, append-only audit log, idempotent money calls, a 29-day authorization lifecycle and webhook reconciliation.
+**Guarded Agent Payments on PayPal** (featured demo: MilestonePay, immigration help). Hackathon demo on the PayPal **sandbox**: milestone-based payments (funds are authorized up front and captured only after a human approves, to a payee that passed PayPal's checks and the public practitioner lists) built on Orders v2 `intent=AUTHORIZE`, with a guard module, append-only audit log, idempotent money calls, a 29-day authorization lifecycle and webhook reconciliation.
 
 > **Disclaimer:** This is a sandbox demo using synthetic data. It is not legal advice, and it is not a law firm. No live PayPal endpoints are used, and no real money moves.
 
@@ -42,8 +42,17 @@ Design notes
 - **Proof reuse:** every uploaded image's sha256 and extracted receipt number go into a registry; the same image or receipt on another case fails the `proof_not_reused` check (no other-case ids are revealed) and goes to human review.
 - **Production safety:** `AI_PROVIDER=fixture` refuses to start when `NODE_ENV=production` or on Render. `ALLOW_SANDBOX_CARD=false` disables the sandbox card path.
 
+## Web UI (same service)
+Open the service root (`/`). A thin, mobile-friendly, bilingual (EN/ES) UI in `public/` (plain JS, no build step; CSP-restricted; all data is rendered as text). It has **no money logic of its own**: every action calls the guard-backed API with the user's bearer token.
+- **Payer / family:** the case, the payee verification badges (both checks, SIMULATED labels, EOIR snapshot dates, accreditation expirations), **Fund with PayPal** (the real PayPal JS SDK popup, `intent=authorize`: `createOrder` calls `POST /api/milestones/:id/order`, which makes the guard create the order; `onApprove` calls `POST .../authorize`; funds are only held), the proof image + AI check, and **Approve**, which sends the proof sha256 it showed.
+- **Provider:** create a synthetic demo case, upload proof (or the synthetic sample receipt), onboarding link, milestone states.
+- **Reviewer:** the proof, the AI check with every pass / fail / not run reason, and **Mark verified** (never an approval; nothing is automatic).
+- **Sign-in** uses the existing bearer tokens. For the three demo actors, `PAYPAL_CLIENT_SECRET=... npm run demo-links -- https://guardian-pay.onrender.com ./demo_login_links.txt` writes one-click links (`/#login=<token>`) to a 0600 file without printing them; the token travels in the URL fragment (never sent to the server), is kept for the browser tab only, and is removed from the address bar. Or paste a token on the sign-in screen.
+- `GET /api/config` (public) returns the sandbox PayPal client id (public by design) and SDK settings.
+- A persistent footer says the app mirrors PayPal's checks, is not a legal determination, and uses synthetic data. UI copy avoids money-holding or identity-assurance claims.
+
 ## Payee verification (Layer 2)
-Before any money moves, Guardian Pay checks **who is being paid**, with two separate checks that the guard requires together. It **mirrors PayPal's seller checks and public EOIR practitioner lists**; it does not guarantee anyone's identity and is **not a legal determination**.
+Before any money moves, Guardian Pay checks **who is being paid**, with two separate checks that the guard requires together. It **mirrors PayPal's seller checks and public EOIR practitioner lists**; it does not confirm anyone's identity and is **not a legal determination**.
 
 1. **PayPal ready to receive** (`paypal_ready`): the provider onboards through PayPal seller onboarding (`POST /v2/customer/partner-referrals` with `tracking_id` = provider id). "Verified by PayPal" requires `payments_receivable = true` AND `primary_email_confirmed = true` AND the authorize/capture and refund permissions in `oauth_third_party`. Each result is stored as an append-only snapshot with the time checked (`provider_verifications`). `MERCHANT.ONBOARDING.COMPLETED` binds and re-verifies; `MERCHANT.PARTNER-CONSENT.REVOKED` freezes funds.
 2. **Authorized to practice** (`authorized_to_practice`): either an accredited representative of a **DOJ EOIR recognized organization**, or a licensed attorney, and **not on the EOIR currently-disciplined list**.

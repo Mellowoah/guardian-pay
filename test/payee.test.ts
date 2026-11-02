@@ -151,7 +151,7 @@ test('verify: both checks are returned separately with bilingual reasons, SIMULA
   assert.equal(pr.status, 'pass'); assert.ok(pr.reason_en && pr.reason_es);
   assert.equal(v.source, 'PayPal seller onboarding status'); assert.equal(v.snapshot.eoir_roster_report_date, '2026-10-25');
   assert.match(v.merchant_id_masked!, /^SIM…001$/); assert.ok(!JSON.stringify(v).includes('SIMOKDEMO0001'), 'merchant id is masked');
-  assert.match(v.disclaimer_en, /does not guarantee/); assert.ok(!/escrow/i.test(JSON.stringify(v)));
+  assert.match(v.disclaimer_en, /does not confirm anyone/); assert.ok(!/escrow/i.test(JSON.stringify(v)));
   const bad = await e.payee.verifyProvider(pid.provider_two);
   assert.equal(bad.verified, false); assert.equal(bad.checks[0].status, 'fail'); assert.equal(bad.checks[1].status, 'fail');
   assert.match(bad.summary_en, /Not verified/); assert.match(bad.summary_es, /No verificado/);

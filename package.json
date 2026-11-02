@@ -15,6 +15,7 @@
     "spike": "tsx spike/run.ts",
     "eval": "tsx scripts/eval.ts",
     "seed-tokens": "tsx scripts/seed-tokens.ts",
+    "demo-links": "tsx scripts/demo-links.ts",
     "integration": "tsx test/integration/live.ts",
     "live-test": "tsx spike/live-webhook-test.ts"
   },

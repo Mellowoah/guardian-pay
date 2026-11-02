@@ -84,7 +84,7 @@ export class Service {
       `SELECT m.*, (SELECT username FROM users WHERE id = m.verified_by) AS verified_by_name, (SELECT username FROM users WHERE id = m.approved_by) AS approved_by_name,
               row_to_json(p) AS payment FROM milestones m LEFT JOIN payments p ON p.milestone_id = m.id WHERE m.case_id = $1 ORDER BY m.seq`, [caseId])).rows;
     const payee = await this.opts.payee.getCasePayee(caseId);
-    return { id: cs.id, title: cs.title, currency: cs.currency, beneficiary_name: cs.beneficiary_name, case_type: cs.case_type, payee, milestones: ms.map(m => ({ ...publicMilestone(m), payment: m.payment ? publicPayment(m.payment) : null })) };
+    return { id: cs.id, provider_id: cs.provider_id, title: cs.title, currency: cs.currency, beneficiary_name: cs.beneficiary_name, case_type: cs.case_type, payee, milestones: ms.map(m => ({ ...publicMilestone(m), payment: m.payment ? publicPayment(m.payment) : null })) };
   }
 
   async casePayee(actor: Actor, caseId: string) { await this.assertCaseAccess(actor, caseId); return this.opts.payee.getCasePayee(caseId); }

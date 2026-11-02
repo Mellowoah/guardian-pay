@@ -48,6 +48,9 @@ async function main() {
   check('no token -> 401; x-demo-user header alone -> 401; wrong token -> 401',
     (await raw(null, 'GET', '/api/cases')).status === 401 && (await raw(null, 'GET', '/api/cases', undefined, { 'x-demo-user': 'family_demo' })).status === 401 && (await raw('gp_' + 'z'.repeat(43), 'GET', '/api/cases')).status === 401);
   check('debug webhook listing is not public', [401, 404].includes((await raw(null, 'GET', '/api/debug/webhooks')).status));
+  const home = await fetch(BASE + '/'); const homeHtml = await home.text(); const cfgJ: any = await (await fetch(BASE + '/api/config')).json().catch(() => ({}));
+  check('web UI is served at / with a CSP and the PayPal SDK config (sandbox, intent=authorize)', home.status === 200 && /Guardian Pay/.test(homeHtml) && /frame-ancestors 'none'/.test(home.headers.get('content-security-policy') ?? '') && !!cfgJ.paypal_client_id && cfgJ.intent === 'authorize' && cfgJ.paypal_env === 'sandbox');
+  check('UI script and the PayPal JS SDK URL are reachable', (await fetch(BASE + '/app.js')).status === 200 && (await fetch(`https://www.paypal.com/sdk/js?client-id=${encodeURIComponent(cfgJ.paypal_client_id ?? '')}&intent=authorize&currency=USD&components=buttons`)).status === 200);
   const adminProbe = ADMIN_TOKEN ? await adminApi('GET', '/api/admin/cases/123e4567-e89b-12d3-a456-426614174000/clock') : { status: 401 };
   const adminOn = adminProbe.status !== 401 && adminProbe.status !== 403; // not mounted: falls through to user auth, which rejects an admin token with 401
   check(adminOn ? 'admin routes enabled on this target; they answer to the admin token' : 'admin routes are OFF by default: the admin token opens nothing (401, not mounted)', true, `status ${adminProbe.status}`);

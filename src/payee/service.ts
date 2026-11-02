@@ -25,8 +25,8 @@ export interface VerifyOut {
   verification_id: number; reused: boolean;
   summary_en: string; summary_es: string; disclaimer_en: string; disclaimer_es: string;
 }
-const DISCLAIMER_EN = 'Guardian Pay mirrors PayPal’s seller checks and public EOIR practitioner lists (dated snapshot). It does not guarantee anyone’s identity and is not a legal determination. Sandbox demo with synthetic data; SIMULATED parts are labeled.';
-const DISCLAIMER_ES = 'Guardian Pay refleja las verificaciones de vendedor de PayPal y las listas públicas de EOIR (instantánea con fecha). No garantiza la identidad de nadie y no es una determinación legal. Demostración en sandbox con datos sintéticos; las partes SIMULADAS están indicadas.';
+const DISCLAIMER_EN = 'Guardian Pay mirrors PayPal’s seller checks and public EOIR practitioner lists (dated snapshot). It does not confirm anyone’s identity and is not a legal determination. Sandbox demo with synthetic data; SIMULATED parts are labeled.';
+const DISCLAIMER_ES = 'Guardian Pay refleja las verificaciones de vendedor de PayPal y las listas públicas de EOIR (instantánea con fecha). No confirma la identidad de nadie y no es una determinación legal. Demostración en sandbox con datos sintéticos; las partes SIMULADAS están indicadas.';
 
 interface ProviderRow { id: number; user_id: number; business_name: string; practitioner_type: 'recognized_org_rep' | 'attorney' | 'none'; person_name: string | null; org_name: string | null; practice_state: string | null; bar_number: string | null; tracking_id: string | null; merchant_id: string | null; consent_revoked_at: Date | null; action_url: string | null; referral_mode: string | null }
 

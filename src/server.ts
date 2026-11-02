@@ -1,3 +1,4 @@
+import { fileURLToPath } from 'node:url';
 import { createApp } from './app.js';
 import { MemoryStore, PgStore, type EventStore } from './store.js';
 import { assertSandbox, verifyWebhookSignature, PayPalClient, type PayPalConfig } from './paypal.js';
@@ -65,7 +66,7 @@ if (db && clientId && clientSecret) {
   const ps = payeeSvc; onEvent = async (id: string) => { await reconcileEvent(d, id, new Date(), ps); };
 } else console.warn('API disabled: needs DATABASE_URL and PayPal credentials');
 
-createApp({ store, verify, onEvent, api, admin, publicApi }).listen(port, () => console.log(`guardian-pay listening on ${port} (store=${store.kind}, api=${api ? 'on' : 'off'}, paypal=${new URL(base).hostname})`));
+createApp({ store, verify, onEvent, api, admin, publicApi, ui: api ? { dir: fileURLToPath(new URL('../public', import.meta.url)), paypalClientId: clientId } : undefined }).listen(port, () => console.log(`guardian-pay listening on ${port} (store=${store.kind}, api=${api ? 'on' : 'off'}, paypal=${new URL(base).hostname})`));
 
 // In-process job every 15 minutes: reauthorize after day 3 (once), warn at day 25, expire at day 29, re-run unprocessed webhooks.
 if (db && guarded) {

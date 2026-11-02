@@ -1,0 +1,45 @@
+:root{--bg:#f5f7fb;--card:#fff;--ink:#14213d;--mute:#5b6b86;--line:#dbe3f0;--brand:#0b5fff;--ok:#0a7d3b;--okbg:#e4f6ea;--bad:#b3261e;--badbg:#fde8e6;--warn:#8a5a00;--warnbg:#fff3d6;--sim:#5b3db3;--simbg:#efe9ff}
+*{box-sizing:border-box}
+body{margin:0;font:16px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--ink);padding-bottom:84px}
+.top{display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between;padding:12px 16px;background:#fff;border-bottom:1px solid var(--line);position:sticky;top:0;z-index:5}
+.brand{display:flex;gap:10px;align-items:center}.logo{font-size:28px}
+h1{font-size:20px;margin:0}.sub{margin:0;color:var(--mute);font-size:13px}
+.tools{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.tabs{display:flex;gap:6px;flex-wrap:wrap}
+button{font:inherit;cursor:pointer;border-radius:8px;border:1px solid var(--line);background:#fff;color:var(--ink);padding:8px 12px;min-height:40px}
+button:hover{border-color:var(--brand)}button:disabled{opacity:.5;cursor:not-allowed}
+button.primary{background:var(--brand);border-color:var(--brand);color:#fff}
+button.danger{color:var(--bad);border-color:#e7b4b0}
+.tab.active{background:var(--ink);color:#fff;border-color:var(--ink)}
+.lang button{border-radius:0;padding:6px 10px;min-height:36px}.lang button:first-child{border-radius:8px 0 0 8px}.lang button:last-child{border-radius:0 8px 8px 0;margin-left:-1px}
+.lang button.on{background:var(--brand);border-color:var(--brand);color:#fff}
+main{max-width:980px;margin:0 auto;padding:16px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px;margin:0 0 14px}
+.card h2,.card h3{margin:0 0 8px}h2{font-size:18px}h3{font-size:16px}
+.muted{color:var(--mute)}.small{font-size:13px}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}.grow{flex:1}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+@media(max-width:700px){.grid2{grid-template-columns:1fr}.top{position:static}}
+.badge{display:inline-block;padding:2px 9px;border-radius:999px;font-size:12px;font-weight:600;border:1px solid transparent;white-space:nowrap}
+.b-pass,.b-ok{background:var(--okbg);color:var(--ok)}.b-fail,.b-bad{background:var(--badbg);color:var(--bad)}
+.b-warn,.b-not_run,.b-needs_review{background:var(--warnbg);color:var(--warn)}
+.b-sim{background:var(--simbg);color:var(--sim);border-color:#d3c6ff}
+.b-state{background:#e8eefc;color:#1d3f9e}
+.check{border:1px solid var(--line);border-radius:10px;padding:12px}
+.check h3{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+ul.clean{margin:6px 0;padding-left:18px}ul.clean li{margin:3px 0}
+.kv{display:grid;grid-template-columns:max-content 1fr;gap:2px 12px;font-size:14px;margin:8px 0}.kv dt{color:var(--mute)}.kv dd{margin:0;word-break:break-word}
+code,.mono{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12.5px;word-break:break-all;background:#f0f3fa;padding:1px 5px;border-radius:5px}
+img.proof{max-width:100%;max-height:360px;border:1px solid var(--line);border-radius:8px;background:#fff}
+input,textarea,select{font:inherit;padding:9px;border:1px solid var(--line);border-radius:8px;width:100%}
+label{display:block;font-size:13px;color:var(--mute);margin:8px 0 3px}
+.notice{border-radius:10px;padding:10px 12px;margin:10px 0;font-size:14px}
+.n-err{background:var(--badbg);color:var(--bad)}.n-info{background:#e8f0ff;color:#1d3f9e}.n-warn{background:var(--warnbg);color:var(--warn)}.n-ok{background:var(--okbg);color:var(--ok)}
+.disclaimer{position:fixed;left:0;right:0;bottom:0;background:#14213d;color:#e8eefc;font-size:12.5px;padding:8px 14px;z-index:9;line-height:1.35}
+.disclaimer b{color:#fff}
+.legend span{margin-right:8px}
+details>summary{cursor:pointer;color:var(--brand);margin:6px 0}
+.pp-slot{margin-top:10px;max-width:420px}
+.hero{background:linear-gradient(135deg,#0b2a6f,#0b5fff);color:#fff;border:0}.hero h2{font-size:22px}.hero p{margin:6px 0}
+.hero .muted{color:#cfe0ff}
+.audit{font-size:13px}.audit td{padding:3px 8px;border-bottom:1px solid var(--line);vertical-align:top}.audit table{border-collapse:collapse;width:100%}
