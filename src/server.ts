@@ -5,7 +5,8 @@ import { connect, type Db } from './db.js';
 import { migrate } from './migrations.js';
 import { GuardedPayPal } from './guard.js';
 import { Service } from './services.js';
-import { buildApi } from './routes.js';
+import { buildApi, buildAdminApi } from './routes.js';
+import { authConfigFromEnv, adminAuth } from './auth.js';
 import { lifecycleTick } from './lifecycle.js';
 import { makeExtractor } from './verify/extraction.js';
 import { Verifier } from './verify/verifier.js';
@@ -33,7 +34,9 @@ if (clientId && clientSecret && webhookId) {
   verify = (h: Parameters<typeof verifyWebhookSignature>[1], raw: string) => verifyWebhookSignature(cfg, h, raw);
 } else console.warn('PAYPAL_CLIENT_ID/SECRET/WEBHOOK_ID not all set: /webhooks/paypal returns 503');
 
+const auth = authConfigFromEnv(process.env);
 let verifier: Verifier | undefined;
+let admin: { gate: import('express').RequestHandler; router?: import('express').Router } | undefined;
 let api: import("express").Router | undefined, onEvent: ((id: string) => Promise<void>) | undefined, guarded: GuardedPayPal | undefined;
 if (db && clientId && clientSecret) {
   guarded = new GuardedPayPal(new PayPalClient({ base, clientId, clientSecret }), db);
@@ -41,12 +44,16 @@ if (db && clientId && clientSecret) {
   const extractor = makeExtractor(process.env);
   verifier = new Verifier(db, extractor);
   console.log(`AI proof check: extractor=${extractor.name} (advisory only; a human must still approve)`);
-  api = buildApi(db, new Service(db, guarded, { publicBaseUrl, allowSandboxCard: true, verifier }), guarded);
+  const svc = new Service(db, guarded, { publicBaseUrl, allowSandboxCard: process.env.ALLOW_SANDBOX_CARD !== 'false', verifier });
+  api = buildApi(db, svc, auth);
+  console.log(`auth: bearer tokens (key source ${auth.keySource}; ${Object.keys(auth.envTokens).length} per-user env tokens); admin routes ${auth.enableAdmin ? 'ENABLED (admin token required)' : 'disabled'}`);
+  if (auth.keySource === 'none' && !Object.keys(auth.envTokens).length) console.warn('auth: no token key configured (set GP_TOKEN_SECRET or per-user GP_TOKEN_<USER>): every API call will return 401');
+  if (auth.enableAdmin) admin = { gate: adminAuth(auth), router: buildAdminApi(db, svc, guarded, auth) };
   const d = db;
   onEvent = async (id: string) => { await reconcileEvent(d, id); };
 } else console.warn('API disabled: needs DATABASE_URL and PayPal credentials');
 
-createApp({ store, verify, onEvent, api }).listen(port, () => console.log(`guardian-pay listening on ${port} (store=${store.kind}, api=${api ? 'on' : 'off'}, paypal=${new URL(base).hostname})`));
+createApp({ store, verify, onEvent, api, admin }).listen(port, () => console.log(`guardian-pay listening on ${port} (store=${store.kind}, api=${api ? 'on' : 'off'}, paypal=${new URL(base).hostname})`));
 
 // In-process job every 15 minutes: reauthorize after day 3 (once), warn at day 25, expire at day 29, re-run unprocessed webhooks.
 if (db && guarded) {

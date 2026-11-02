@@ -3,7 +3,7 @@
  * Everything here is pure, repeatable and explainable in English and Spanish.
  */
 export type CheckStatus = 'pass' | 'fail' | 'not_run';
-export type CheckId = 'receipt_format' | 'form_type_match' | 'notice_date_valid' | 'beneficiary_match' | 'document_type_match' | 'legibility';
+export type CheckId = 'receipt_format' | 'form_type_match' | 'notice_date_valid' | 'beneficiary_match' | 'document_type_match' | 'legibility' | 'proof_not_reused';
 export type DocumentType = 'receipt_notice' | 'rfe_response' | 'interview_notice' | 'other';
 export type Recommendation = 'recommend_approve' | 'needs_human_review' | 'recommend_reject';
 
@@ -13,6 +13,8 @@ export interface Extraction {
 }
 export interface CheckContext {
   caseCreatedAt: Date; now: Date; beneficiaryName: string | null; expectedFormType: string | null; expectedDocumentType: string | null;
+  /** Looked up by the verifier from the proof registry. Counts are of OTHER milestones (never this one); ids are deliberately not exposed to families. */
+  reuse?: { sameImage: number; sameReceipt: number; hasImage: boolean };
 }
 export interface CheckResult { id: CheckId; label_en: string; label_es: string; status: CheckStatus; weight: number; reason_en: string; reason_es: string }
 export interface Verdict {
@@ -20,7 +22,7 @@ export interface Verdict {
   explanation: { summary_en: string; summary_es: string; highlighted: CheckId[]; human_approval_required: true; note_en: string; note_es: string };
 }
 
-export const WEIGHTS: Record<CheckId, number> = { receipt_format: 20, form_type_match: 20, notice_date_valid: 15, beneficiary_match: 20, document_type_match: 15, legibility: 10 };
+export const WEIGHTS: Record<CheckId, number> = { receipt_format: 20, form_type_match: 20, notice_date_valid: 15, beneficiary_match: 20, document_type_match: 15, legibility: 5, proof_not_reused: 5 };
 export const APPROVE_AT = 0.8;
 export const REJECT_BELOW = 0.5;
 export const MIN_CONFIDENCE = 0.6;
@@ -33,6 +35,7 @@ const LABELS: Record<CheckId, [string, string]> = {
   beneficiary_match: ['Beneficiary name matches the case', 'El nombre del beneficiario coincide con el caso'],
   document_type_match: ['Document type matches the milestone', 'El tipo de documento coincide con el hito'],
   legibility: ['Image is legible / extraction is confident', 'La imagen es legible / la extracción es confiable'],
+  proof_not_reused: ['Proof has not been used before', 'La prueba no se ha usado antes'],
 };
 const DOC_ES: Record<string, string> = { receipt_notice: 'aviso de recibo', rfe_response: 'respuesta a solicitud de evidencia (RFE)', interview_notice: 'aviso de entrevista', other: 'otro' };
 const DOC_EN: Record<string, string> = { receipt_notice: 'receipt notice', rfe_response: 'RFE response', interview_notice: 'interview notice', other: 'other' };
@@ -64,6 +67,13 @@ const notRun = (en: string, es: string): R => ({ status: 'not_run', reason_en: e
 const unread = (what_en: string, what_es: string) => notRun(`The ${what_en} could not be read from the proof, so this check was not run.`, `No se pudo leer ${what_es} en la prueba, por lo que esta verificación no se ejecutó.`);
 
 export const CHECKS: Record<CheckId, (x: Extraction | null, c: CheckContext) => R> = {
+  proof_not_reused(x, c) {
+    if (!c.reuse) return notRun('The proof registry could not be consulted, so this check was not run.', 'No se pudo consultar el registro de pruebas; esta verificación no se ejecutó.');
+    if (!c.reuse.hasImage) return notRun('No image was uploaded, so there is nothing to compare with earlier proofs.', 'No se subió ninguna imagen, así que no hay nada que comparar con pruebas anteriores.');
+    if (c.reuse.sameImage > 0) return fail('This exact image was already submitted as proof on another milestone or case. A human must review it (details are not shown for privacy).', 'Esta misma imagen ya se envió como prueba en otro hito o caso. Una persona debe revisarla (los detalles no se muestran por privacidad).');
+    if (c.reuse.sameReceipt > 0) return fail('This receipt number already appears on a proof for another milestone or case. A human must review it (details are not shown for privacy).', 'Este número de recibo ya aparece en una prueba de otro hito o caso. Una persona debe revisarla (los detalles no se muestran por privacidad).');
+    return pass('This image and receipt number have not been used on any other milestone or case.', 'Esta imagen y este número de recibo no se han usado en ningún otro hito o caso.');
+  },
   receipt_format(x) {
     if (!x) return notRun('AI extraction was unavailable, so this check was not run.', 'La extracción por IA no estuvo disponible; esta verificación no se ejecutó.');
     if (!x.receipt_number) return unread('receipt number', 'el número de recibo');
@@ -115,7 +125,7 @@ export const CHECKS: Record<CheckId, (x: Extraction | null, c: CheckContext) => 
   },
 };
 
-export const CHECK_ORDER: CheckId[] = ['receipt_format', 'form_type_match', 'notice_date_valid', 'beneficiary_match', 'document_type_match', 'legibility'];
+export const CHECK_ORDER: CheckId[] = ['receipt_format', 'form_type_match', 'notice_date_valid', 'beneficiary_match', 'document_type_match', 'legibility', 'proof_not_reused'];
 
 /** Values read from an image the model itself calls blurry/unreadable or is not confident about are not trustworthy (vision models can invent
  *  plausible text for smudged images), so the content checks are NOT RUN on them; the legibility check carries the verdict and a human looks. */
@@ -124,7 +134,7 @@ export const untrustedExtraction = (x: Extraction | null): boolean => !!x && (x.
 export function runChecks(x: Extraction | null, c: CheckContext): CheckResult[] {
   const untrusted = untrustedExtraction(x);
   return CHECK_ORDER.map(id => {
-    const r = untrusted && id !== 'legibility'
+    const r = untrusted && id !== 'legibility' && id !== 'proof_not_reused'
       ? notRun('The image is not clear enough to trust the text read from it, so this check was not run.', 'La imagen no es lo bastante clara para confiar en el texto leído, por lo que esta verificación no se ejecutó.')
       : CHECKS[id](x, c);
     return { id, label_en: LABELS[id][0], label_es: LABELS[id][1], weight: WEIGHTS[id], ...r };

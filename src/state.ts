@@ -3,7 +3,7 @@ export type MilestoneState = (typeof STATES)[number];
 
 /**
  * created -> authorized -> (reauthorized) -> proof_submitted -> verified -> captured
- * proof_submitted -> rejected -> voided
+ * proof_submitted | verified -> rejected -> voided   (the family may reject/dispute even after the reviewer verified)
  * authorized | reauthorized -> expired at day 29 (we also allow proof_submitted | verified -> expired, since the
  * authorization lapses at day 29 regardless of where review is).
  */
@@ -12,7 +12,7 @@ export const TRANSITIONS: Record<MilestoneState, readonly MilestoneState[]> = {
   authorized: ['reauthorized', 'proof_submitted', 'expired'],
   reauthorized: ['proof_submitted', 'expired'],
   proof_submitted: ['verified', 'rejected', 'expired'],
-  verified: ['captured', 'expired'],
+  verified: ['captured', 'rejected', 'expired'],
   rejected: ['voided'],
   captured: [],
   voided: [],

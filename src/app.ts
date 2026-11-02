@@ -10,11 +10,14 @@ export interface AppDeps {
   onEvent?: (eventId: string, eventType: string) => Promise<void>;
   /** mounts the /api router (needs a database) */
   api?: import('express').Router;
+  /** admin surface (only when ENABLE_ADMIN_ROUTES=true): `gate` is the admin-token check; `router` is mounted at /api/admin */
+  admin?: { gate: import('express').RequestHandler; router?: import('express').Router };
 }
 
-export function createApp({ store, verify, onEvent, api }: AppDeps) {
+export function createApp({ store, verify, onEvent, api, admin }: AppDeps) {
   const app = express();
   app.disable('x-powered-by');
+  app.set('trust proxy', 1);
 
   app.get('/health', (_req, res) => { res.json({ ok: true, store: store.kind }); });
 
@@ -35,11 +38,14 @@ export function createApp({ store, verify, onEvent, api }: AppDeps) {
     res.status(200).json({ received: true, duplicate: !inserted });
   });
 
-  // Read-only: type, id, verified, received_at only (no payloads)
-  app.get('/api/debug/webhooks', async (_req, res) => {
-    const rows = await store.recent(50);
-    res.json({ store: store.kind, events: rows.map(r => ({ type: r.event_type, id: r.paypal_event_id, verified: r.verified, received_at: r.received_at })) });
-  });
+  // Debug + admin: NOT mounted unless ENABLE_ADMIN_ROUTES=true, and then only behind the admin token. Read-only: type, id, verified, received_at (no payloads).
+  if (admin) {
+    app.get('/api/debug/webhooks', admin.gate, async (_req, res) => {
+      const rows = await store.recent(50);
+      res.json({ store: store.kind, events: rows.map(r => ({ type: r.event_type, id: r.paypal_event_id, verified: r.verified, received_at: r.received_at })) });
+    });
+    if (admin.router) app.use('/api/admin', admin.router);
+  }
   if (api) app.use('/api', api);
   app.get('/paypal/return', (_req, res) => { res.type('text').send('Approved in the PayPal sandbox. You can close this tab and call POST /api/milestones/:id/authorize.'); });
   app.get('/paypal/cancel', (_req, res) => { res.type('text').send('Cancelled in the PayPal sandbox.'); });

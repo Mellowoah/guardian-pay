@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { CHECKS, CHECK_ORDER, WEIGHTS, evaluate, recommend, runChecks, scoreOf, namesMatch, parseIsoDate, type CheckContext, type Extraction } from '../src/verify/checks.js';
 import { parseExtraction, geminiExtractor, openaiExtractor, makeExtractor, noExtractor, fixtureExtractor, pngTextChunks, sniffImage, ExtractionUnavailable } from '../src/verify/extraction.js';
 
-const ctx: CheckContext = { caseCreatedAt: new Date('2026-01-15T10:00:00Z'), now: new Date('2026-11-01T12:00:00Z'), beneficiaryName: 'Mateo Reyes', expectedFormType: 'I-130', expectedDocumentType: 'receipt_notice' };
+const ctx: CheckContext = { caseCreatedAt: new Date('2026-01-15T10:00:00Z'), now: new Date('2026-11-01T12:00:00Z'), beneficiaryName: 'Mateo Reyes', expectedFormType: 'I-130', expectedDocumentType: 'receipt_notice', reuse: { sameImage: 0, sameReceipt: 0, hasImage: true } };
 const good: Extraction = { form_type: 'I-130', receipt_number: 'EAC2612345678', notice_date: '2026-02-10', beneficiary_name: 'Mateo Reyes', document_type: 'receipt_notice', case_type: 'x', legibility: 'clear', confidence: 0.95 };
 const st = (id: keyof typeof CHECKS, x: Extraction | null, c = ctx) => CHECKS[id](x, c).status;
 
@@ -49,9 +49,9 @@ test('check 6 legibility/confidence: clear+confident passes, blurry/low confiden
   assert.equal(st('legibility', { ...good, legibility: 'blurry' }), 'not_run'); assert.equal(st('legibility', { ...good, legibility: 'unreadable' }), 'fail');
   assert.equal(st('legibility', null), 'not_run');
 });
-test('every check returns an English AND Spanish reason, and six checks always run in order', () => {
+test('every check returns an English AND Spanish reason, and seven checks always run in order', () => {
   for (const x of [good, null, { ...good, receipt_number: 'BAD', form_type: 'I-1', notice_date: '2099-01-01', beneficiary_name: 'Zed', document_type: 'other' as const }]) {
-    const r = runChecks(x, ctx); assert.deepEqual(r.map(c => c.id), CHECK_ORDER); assert.equal(r.length, 6);
+    const r = runChecks(x, ctx); assert.deepEqual(r.map(c => c.id), CHECK_ORDER); assert.equal(r.length, 7);
     for (const c of r) { assert.ok(c.reason_en.length > 10 && c.reason_es.length > 10 && c.label_es, c.id); assert.notEqual(c.reason_en, c.reason_es); assert.ok(['pass', 'fail', 'not_run'].includes(c.status)); }
   }
   assert.equal(Object.values(WEIGHTS).reduce((a, b) => a + b, 0), 100);
@@ -87,7 +87,7 @@ test('evaluate: explanation is bilingual, highlights unsure checks, and always r
   assert.equal(v.explanation.human_approval_required, true);
   assert.equal(evaluate(good, ctx).explanation.human_approval_required, true); // even a perfect score
   assert.deepEqual(evaluate(good, ctx), evaluate(good, ctx)); // repeatable
-  const down = evaluate(null, ctx); assert.equal(down.recommendation, 'needs_human_review'); assert.ok(down.checks.every(c => c.status === 'not_run'));
+  const down = evaluate(null, ctx); assert.equal(down.recommendation, 'needs_human_review'); assert.ok(down.checks.filter(c => c.id !== 'proof_not_reused').every(c => c.status === 'not_run'));
 });
 
 test('parseExtraction sanitises model output (unknown values become null, extra keys dropped, confidence clamped)', () => {
@@ -142,7 +142,7 @@ test('fixtures: every proof image is marked SYNTHETIC and the eval manifest matc
     const bytes = readFileSync(new URL('./fixtures/proofs/' + f.file, import.meta.url));
     assert.match(pngTextChunks(bytes)['gp-synthetic'] ?? '', /SYNTHETIC/);
     const x = await fixtureExtractor.extract(bytes, 'image/png');
-    const v = evaluate(x, { caseCreatedAt: new Date(f.context.case_created_at + 'T00:00:00Z'), now: new Date(m.now), beneficiaryName: f.context.beneficiary_name, expectedFormType: f.context.expected_form_type, expectedDocumentType: f.context.expected_document_type });
+    const v = evaluate(x, { caseCreatedAt: new Date(f.context.case_created_at + 'T00:00:00Z'), now: new Date(m.now), beneficiaryName: f.context.beneficiary_name, expectedFormType: f.context.expected_form_type, expectedDocumentType: f.context.expected_document_type, reuse: { sameImage: 0, sameReceipt: 0, hasImage: true } });
     assert.equal(v.recommendation, f.expected_recommendation, f.file); assert.equal(v.score, f.expected_score, f.file);
     counts[f.expected_recommendation] = (counts[f.expected_recommendation] ?? 0) + 1;
   }
@@ -152,13 +152,24 @@ test('fixtures: every proof image is marked SYNTHETIC and the eval manifest matc
 test('untrusted extraction: values read from a blurry/low-confidence image are NOT checked (a model can invent plausible text), human review; never approve or reject', () => {
   const hallucinated: Extraction = { form_type: 'I-797', receipt_number: 'LIN0000000000', notice_date: '2023-11-14', beneficiary_name: 'John Doe', document_type: 'receipt_notice', case_type: null, legibility: 'blurry', confidence: 0.4 };
   const r = runChecks(hallucinated, ctx);
-  assert.deepEqual(r.map(c => c.status), ['not_run', 'not_run', 'not_run', 'not_run', 'not_run', 'not_run']);
+  assert.deepEqual(r.map(c => c.status), ['not_run', 'not_run', 'not_run', 'not_run', 'not_run', 'not_run', 'pass']); // the hash-based reuse check still runs
   assert.ok(r.every(c => c.reason_en && c.reason_es));
-  assert.equal(recommend(r), 'needs_human_review'); assert.equal(scoreOf(r), 0.5);
+  assert.equal(recommend(r), 'needs_human_review'); assert.equal(scoreOf(r), 0.525);
   // a clear image with low confidence is also untrusted; a clear confident one is checked normally
-  assert.ok(runChecks({ ...hallucinated, legibility: 'clear', confidence: 0.59 }, ctx).every(c => c.status === 'not_run'));
+  assert.ok(runChecks({ ...hallucinated, legibility: 'clear', confidence: 0.59 }, ctx).filter(c => c.id !== 'proof_not_reused').every(c => c.status === 'not_run'));
   assert.ok(runChecks({ ...hallucinated, legibility: 'clear', confidence: 0.9 }, ctx).some(c => c.status === 'fail'));
   // unreadable: legibility fails, the rest are not run -> still human review (incomplete evidence is never a reject)
   const u = runChecks({ ...hallucinated, legibility: 'unreadable', confidence: 0.1 }, ctx);
   assert.equal(u.find(c => c.id === 'legibility')!.status, 'fail'); assert.equal(recommend(u), 'needs_human_review');
+});
+
+test('check 7 proof_not_reused: same image or same receipt elsewhere fails; no image / no registry is not_run; never leaks ids', () => {
+  assert.equal(st('proof_not_reused', good), 'pass');
+  assert.equal(st('proof_not_reused', good, { ...ctx, reuse: { sameImage: 1, sameReceipt: 0, hasImage: true } }), 'fail');
+  assert.equal(st('proof_not_reused', good, { ...ctx, reuse: { sameImage: 0, sameReceipt: 2, hasImage: true } }), 'fail');
+  assert.equal(st('proof_not_reused', good, { ...ctx, reuse: { sameImage: 0, sameReceipt: 0, hasImage: false } }), 'not_run');
+  assert.equal(st('proof_not_reused', good, { ...ctx, reuse: undefined }), 'not_run');
+  // a perfect extraction on a reused image can never be recommended for approval; it goes to a human with the reason
+  const reused = evaluate(good, { ...ctx, reuse: { sameImage: 1, sameReceipt: 0, hasImage: true } });
+  assert.equal(reused.recommendation, 'needs_human_review'); assert.ok(reused.highlighted.includes('proof_not_reused')); assert.ok(reused.explanation.summary_en.includes('Proof has not been used before'));
 });

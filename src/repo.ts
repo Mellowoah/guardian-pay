@@ -11,6 +11,8 @@ export interface MilestoneRow {
   id: string; case_id: string; seq: number; title: string; amount: string; state: MilestoneState;
   proof_note: string | null; rejection_reason: string | null; currency: string; provider_user_id: number; family_user_id: number | null;
   expected_form_type?: string | null; expected_document_type?: string | null;
+  verified_by?: number | null; verified_proof_sha256?: string | null; approved_by?: number | null; disputed_at?: Date | null; dispute_note?: string | null;
+  verified_by_name?: string | null; approved_by_name?: string | null; case_clock_offset_days: number;
 }
 export interface PaymentRow {
   id: string; milestone_id: string; amount: string; currency: string; paypal_order_id: string | null; approve_url: string | null;
@@ -20,12 +22,17 @@ export interface PaymentRow {
   last_error: string | null; mismatch_flag: boolean; mismatch_note: string | null; webhook_confirmed_at: Date | null;
 }
 
+/** the case's own (demo) clock: real time shifted by the per-case offset. There is no global clock. */
+export const caseNow = (offsetDays: number, real = Date.now()) => new Date(real + (offsetDays || 0) * 86_400_000);
+export const mNow = (m: Pick<MilestoneRow, 'case_clock_offset_days'>) => caseNow(m.case_clock_offset_days);
+
 export const actorLabel = (a: Actor) => (a.role === 'system' ? 'system' : `${a.label}(${a.role})`);
 
 export async function loadMilestone(q: Pick<pg.PoolClient, 'query'>, id: string, lock = false): Promise<MilestoneRow> {
   if (!/^[0-9a-f-]{36}$/i.test(id)) throw new HttpError(404, 'not_found', 'milestone not found');
   const { rows } = await q.query(
-    `SELECT m.*, c.currency, p.user_id AS provider_user_id, c.family_user_id
+    `SELECT m.*, c.currency, p.user_id AS provider_user_id, c.family_user_id, c.clock_offset_days AS case_clock_offset_days,
+            (SELECT username FROM users WHERE id = m.verified_by) AS verified_by_name, (SELECT username FROM users WHERE id = m.approved_by) AS approved_by_name
        FROM milestones m JOIN cases c ON c.id = m.case_id JOIN providers p ON p.id = c.provider_id
       WHERE m.id = $1 ${lock ? 'FOR UPDATE OF m' : ''}`, [id]);
   if (!rows[0]) throw new HttpError(404, 'not_found', 'milestone not found');

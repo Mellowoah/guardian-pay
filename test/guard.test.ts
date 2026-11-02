@@ -5,34 +5,56 @@ import { checkMandate, GuardedPayPal, GuardDenied, type Actor, type GuardAction 
 import { PayPalClient } from '../src/paypal.js';
 
 const M = '123e4567-e89b-12d3-a456-426614174000';
+const SHA = 'a'.repeat(64);
 const family: Actor = { userId: 1, role: 'family', label: 'family_demo' };
 const provider: Actor = { userId: 2, role: 'provider', label: 'provider_demo' };
+const reviewer: Actor = { userId: 4, role: 'reviewer', label: 'reviewer_demo' };
+const facts = { familyUserId: 1, verifiedBy: 4, verifiedProofSha: SHA, currentProofSha: SHA, disputed: false };
 const base = (o: Partial<GuardAction>): GuardAction => ({ type: 'capture', amount: '10.00', actor: family,
-  milestone: { id: M, state: 'verified', providerUserId: 2 }, approvals: [], ...o });
-const approve = { decision: 'approve' as const, user_id: 1, role: 'family' };
+  milestone: { id: M, state: 'verified', providerUserId: 2 }, approvals: [], facts, ...o });
+const approve = { decision: 'approve' as const, user_id: 1, role: 'family', proof_sha256: SHA };
 
 test('guard: amount must be > 0', () => {
   for (const amount of ['0', '-5', 'abc', 0]) assert.equal(checkMandate(base({ type: 'order', amount, approvals: [approve] })).allow, false);
   assert.equal(checkMandate(base({ type: 'order', amount: '0.01' })).allow, true);
 });
-test('guard: capture requires a recorded human approval', () => {
-  const d = checkMandate(base({ approvals: [] }));
-  assert.deepEqual(d, { allow: false, reason: 'capture requires a recorded human approval' });
+test('guard: capture requires a recorded approval by the CASE FAMILY', () => {
+  assert.deepEqual(checkMandate(base({ approvals: [] })), { allow: false, reason: 'capture requires a recorded human approval' });
   assert.equal(checkMandate(base({ approvals: [approve] })).allow, true);
 });
-test('guard: provider approval row does not count; provider cannot capture', () => {
-  assert.equal(checkMandate(base({ approvals: [{ decision: 'approve', user_id: 2, role: 'provider' }] })).allow, false);
+test('guard: separation of duties - reviewer/provider/other family cannot capture or fund; approvals by them do not count', () => {
+  assert.equal(checkMandate(base({ actor: reviewer, approvals: [approve] })).allow, false);          // reviewer cannot capture
   assert.equal(checkMandate(base({ actor: provider, approvals: [approve] })).allow, false);
-  assert.equal(checkMandate(base({ approvals: [{ decision: 'approve', user_id: 2, role: 'reviewer' }] })).allow, false); // same user as provider
+  assert.equal(checkMandate(base({ actor: { ...family, userId: 9 }, approvals: [{ ...approve, user_id: 9 }] })).allow, false); // some other family
+  assert.equal(checkMandate(base({ approvals: [{ ...approve, user_id: 4, role: 'reviewer' }] })).allow, false);               // reviewer's "approval" is not enough
+  assert.equal(checkMandate(base({ approvals: [{ ...approve, user_id: 2, role: 'provider' }] })).allow, false);
+  assert.equal(checkMandate(base({ type: 'order', actor: reviewer })).allow, false);                  // reviewer cannot fund
+  assert.equal(checkMandate(base({ type: 'authorize', actor: provider })).allow, false);
 });
-test('guard: reject row is not an approval; capture needs state verified', () => {
-  assert.equal(checkMandate(base({ approvals: [{ decision: 'reject', user_id: 1, role: 'family' }] })).allow, false);
+test('guard: verifier and approver must be distinct people, and the verification must exist', () => {
+  assert.equal(checkMandate(base({ approvals: [approve], facts: { ...facts, verifiedBy: 1 } })).allow, false); // family verified its own
+  assert.equal(checkMandate(base({ approvals: [approve], facts: { ...facts, verifiedBy: 2 } })).allow, false); // provider "verified"
+  assert.equal(checkMandate(base({ approvals: [approve], facts: { ...facts, verifiedBy: null } })).allow, false);
+});
+test('guard: approval is bound to the proof sha256; a changed or different proof makes it stale', () => {
+  assert.match((checkMandate(base({ approvals: [{ ...approve, proof_sha256: 'b'.repeat(64) }] })) as any).reason, /stale approval/);
+  assert.equal(checkMandate(base({ approvals: [{ ...approve, proof_sha256: null }] })).allow, false);
+  assert.match((checkMandate(base({ approvals: [approve], facts: { ...facts, currentProofSha: 'c'.repeat(64) } })) as any).reason, /proof changed after it was verified/);
+  assert.equal(checkMandate(base({ approvals: [approve], facts: { ...facts, currentProofSha: null, verifiedProofSha: null } })).allow, false);
+});
+test('guard: reject row is not an approval; a family rejection of the current proof blocks capture; capture needs state verified; disputes block', () => {
+  assert.equal(checkMandate(base({ approvals: [{ decision: 'reject', user_id: 1, role: 'family', proof_sha256: SHA }] })).allow, false);
+  assert.equal(checkMandate(base({ approvals: [approve, { decision: 'reject', user_id: 1, role: 'family', proof_sha256: SHA }] })).allow, false);
   assert.equal(checkMandate(base({ approvals: [approve], milestone: { id: M, state: 'proof_submitted', providerUserId: 2 } })).allow, false);
+  assert.equal(checkMandate(base({ approvals: [approve], facts: { ...facts, disputed: true } })).allow, false);
 });
-test('guard: void needs state rejected and a human rejection; reauthorize roles', () => {
-  const rej = { decision: 'reject' as const, user_id: 1, role: 'family' };
-  assert.equal(checkMandate(base({ type: 'void', approvals: [], milestone: { id: M, state: 'rejected', providerUserId: 2 } })).allow, false);
-  assert.equal(checkMandate(base({ type: 'void', approvals: [rej], milestone: { id: M, state: 'rejected', providerUserId: 2 } })).allow, true);
+test('guard: void needs state rejected and a human rejection (case family or reviewer); reauthorize roles', () => {
+  const rej = { decision: 'reject' as const, user_id: 1, role: 'family', proof_sha256: SHA };
+  const rejected = { id: M, state: 'rejected' as const, providerUserId: 2 };
+  assert.equal(checkMandate(base({ type: 'void', approvals: [], milestone: rejected })).allow, false);
+  assert.equal(checkMandate(base({ type: 'void', approvals: [rej], milestone: rejected })).allow, true);
+  assert.equal(checkMandate(base({ type: 'void', actor: reviewer, approvals: [{ ...rej, user_id: 4, role: 'reviewer' }], milestone: rejected })).allow, true);
+  assert.equal(checkMandate(base({ type: 'void', actor: provider, approvals: [rej], milestone: rejected })).allow, false);
   assert.equal(checkMandate(base({ type: 'void', approvals: [rej] })).allow, false); // state verified
   const sys: Actor = { userId: null, role: 'system', label: 'system' };
   assert.equal(checkMandate(base({ type: 'reauthorize', actor: sys, milestone: { id: M, state: 'authorized', providerUserId: 2 } })).allow, true);
@@ -47,7 +69,8 @@ function harness(approvalRows: any[]) {
     calls.push(`${init.method} ${u}`); return new Response('{}', { status: 201 });
   }) as typeof fetch;
   const client = new PayPalClient({ base: 'https://api-m.sandbox.paypal.com', clientId: 'a', clientSecret: 'b' }, f);
-  const gp = new GuardedPayPal(client, { query: (async () => ({ rows: approvalRows })) as any });
+  const gp = new GuardedPayPal(client, { query: (async (sql: string) => ({ rows: /FROM milestones m/.test(sql)
+    ? [{ family_user_id: 1, verified_by: 4, verified_proof_sha256: SHA, current_proof_sha: SHA, disputed_at: null }] : approvalRows })) as any });
   return { calls, gp };
 }
 const ctx = (o: any = {}) => ({ actor: family, milestone: { id: M, state: 'verified' as const, providerUserId: 2 }, amount: '10.00', attempt: 1, ...o });
@@ -58,7 +81,7 @@ test('BYPASS: capture without approval row is denied and PayPal is never called'
   assert.equal(calls.length, 0);
 });
 test('BYPASS: provider-forged approval, wrong state, zero amount, provider actor all denied', async () => {
-  let h = harness([{ decision: 'approve', user_id: 2, role: 'provider' }]);
+  let h = harness([{ decision: 'approve', user_id: 2, role: 'provider', proof_sha256: SHA }]);
   await assert.rejects(() => h.gp.capture(ctx(), 'A', 'USD'), GuardDenied);
   h = harness([approve]);
   await assert.rejects(() => h.gp.capture(ctx({ milestone: { id: M, state: 'proof_submitted', providerUserId: 2 } }), 'A', 'USD'), GuardDenied);

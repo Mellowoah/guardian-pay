@@ -90,9 +90,18 @@ export const fixtureExtractor: Extractor = { name: 'fixture', async extract(byte
 
 export const noExtractor: Extractor = { name: 'none', async extract() { throw new ExtractionUnavailable('no AI provider configured (set AI_PROVIDER and AI_API_KEY)'); } };
 
+/** The fixture extractor reads an answer that the image itself carries, so anyone could upload a "forged" PNG that vouches for itself.
+ *  It must never run in production or on Render: refuse to start rather than quietly trust it. */
+export const isProductionEnv = (env: Record<string, string | undefined>) => env.NODE_ENV === 'production' || !!env.RENDER || !!env.RENDER_SERVICE_ID;
+export class FixtureInProduction extends Error { constructor() { super('REFUSING TO START: AI_PROVIDER=fixture is demo/test only and is not allowed when NODE_ENV=production or on Render. Use AI_PROVIDER=gemini|openai (or unset it for human-review-only).'); this.name = 'FixtureInProduction'; } }
+
 export function makeExtractor(env: Record<string, string | undefined>, fetchImpl: typeof fetch = fetch): Extractor {
   const p = (env.AI_PROVIDER ?? '').trim().toLowerCase();
-  if (p === 'fixture') return fixtureExtractor;
+  if (p === 'fixture') {
+    if (isProductionEnv(env)) { console.error('!!!!! ' + new FixtureInProduction().message); throw new FixtureInProduction(); }
+    console.warn('AI_PROVIDER=fixture: offline demo extractor (reads answers embedded in the image). NOT for production.');
+    return fixtureExtractor;
+  }
   if (p === 'gemini' || p === 'openai') {
     if (!env.AI_API_KEY) { console.warn(`AI_PROVIDER=${p} but AI_API_KEY is not set: AI proof check disabled (human review only)`); return noExtractor; }
     const cfg = { apiKey: env.AI_API_KEY, model: env.AI_MODEL || undefined, baseUrl: env.AI_BASE_URL || undefined };

@@ -1,10 +1,10 @@
 import type { Db } from './db.js';
 import { GuardedPayPal, type Actor } from './guard.js';
-import { clock, addDays, DAY } from './clock.js';
+import { addDays, DAY } from './clock.js';
 import { audit } from './audit.js';
 import { isDefinitiveFailure, paypalIssue } from './paypal.js';
 import { HOLDING, type MilestoneState } from './state.js';
-import { loadMilestone, loadPayment, transition, updatePayment, attemptOf, bumped } from './repo.js';
+import { loadMilestone, loadPayment, transition, updatePayment, attemptOf, bumped, caseNow } from './repo.js';
 
 export type LifecycleAction = 'reauthorize' | 'warn' | 'expire';
 export interface LifecycleInput {
@@ -25,17 +25,17 @@ export function planLifecycle(i: LifecycleInput): LifecycleAction[] {
 }
 
 const SYSTEM: Actor = { userId: null, role: 'system', label: 'system' };
-export interface TickResult { checked: number; reauthorized: number; deferred: number; warned: number; expired: number; errors: string[] }
+export interface TickResult { checked: number; reauthorized: number; deferred: number; warned: number; expired: number; expire_blocked: number; errors: string[] }
 
 export async function lifecycleTick(db: Db, guarded: GuardedPayPal, opts: { caseId?: string } = {}): Promise<TickResult> {
-  const now = clock.now();
-  const r: TickResult = { checked: 0, reauthorized: 0, deferred: 0, warned: 0, expired: 0, errors: [] };
+  const r: TickResult = { checked: 0, reauthorized: 0, deferred: 0, warned: 0, expired: 0, expire_blocked: 0, errors: [] };
   const { rows } = await db.query(
-    `SELECT p.milestone_id FROM payments p JOIN milestones m ON m.id = p.milestone_id
+    `SELECT p.milestone_id, c.clock_offset_days FROM payments p JOIN milestones m ON m.id = p.milestone_id JOIN cases c ON c.id = m.case_id
       WHERE p.status IN ('authorized','reauthorized') AND m.state = ANY($1) ${opts.caseId ? 'AND m.case_id = $2' : ''}`,
     opts.caseId ? [HOLDING, opts.caseId] : [HOLDING]);
-  for (const { milestone_id } of rows) {
+  for (const { milestone_id, clock_offset_days } of rows) {
     r.checked++;
+    const now = caseNow(clock_offset_days); // the CASE's clock (0 = real time); there is no global clock
     try {
       const plan = await db.tx(async c => {
         const m = await loadMilestone(c, milestone_id, true); const p = await loadPayment(c, milestone_id);
@@ -43,7 +43,7 @@ export async function lifecycleTick(db: Db, guarded: GuardedPayPal, opts: { case
         return { actions: planLifecycle({ now, authorized_at: p.authorized_at, honor_until: p.honor_until, expires_at: p.expires_at, reauth_count: p.reauth_count, warned_at: p.warned_at, state: m.state }) };
       }, milestone_id);
       for (const a of plan.actions) {
-        if (a === 'expire') { await expire(db, milestone_id, now); r.expired++; }
+        if (a === 'expire') { const o = await expire(db, guarded, milestone_id, now, clock_offset_days); if (o === 'expired') r.expired++; else if (o === 'blocked') r.expire_blocked++; }
         if (a === 'warn') { await warn(db, milestone_id, now); r.warned++; }
         if (a === 'reauthorize') { const o = await reauth(db, guarded, milestone_id, now); if (o === 'done') r.reauthorized++; else if (o === 'deferred') r.deferred++; }
       }
@@ -52,14 +52,34 @@ export async function lifecycleTick(db: Db, guarded: GuardedPayPal, opts: { case
   return r;
 }
 
-async function expire(db: Db, id: string, now: Date) {
+/** An authorization is only marked expired when PayPal itself says so (EXPIRED/VOIDED). The local (or demo) clock alone never expires money:
+ *  if PayPal still shows the authorization live, we flag the disagreement in the audit log and leave the milestone untouched. */
+const PAYPAL_GONE = ['EXPIRED', 'VOIDED'];
+async function expire(db: Db, guarded: GuardedPayPal, id: string, now: Date, offsetDays: number): Promise<'expired' | 'blocked' | 'skipped'> {
+  const pre = await db.tx(async c => { const m = await loadMilestone(c, id, true); const p = await loadPayment(c, id); return HOLDING.includes(m.state) && p ? { authId: p.current_authorization_id } : null; }, id);
+  if (!pre?.authId) return 'skipped';
+  const res = await guarded.getAuthorization(pre.authId);
+  const ppStatus: string = res.status < 300 ? String(res.body?.status ?? 'UNKNOWN') : `HTTP_${res.status}`;
+  if (!PAYPAL_GONE.includes(ppStatus)) {
+    await db.tx(async c => {
+      const m = await loadMilestone(c, id, true); const p = (await loadPayment(c, id))!;
+      const attempts: Record<string, number> = { ...p.attempts };
+      const last = Number((attempts as any).expire_blocked_at ?? 0);
+      if (Date.now() - last < 6 * 3_600_000) return; // log at most every 6h per payment
+      (attempts as any).expire_blocked_at = Date.now();
+      await updatePayment(c, p.id, { attempts, last_error: `expiry blocked: PayPal still reports the authorization ${ppStatus}` });
+      await audit(c, { actor: 'system', action: 'payment.expire_blocked', targetType: 'payment', targetId: p.id, caseId: m.case_id, before: { state: m.state, expires_at: p.expires_at },
+        after: { paypal_authorization_status: ppStatus, case_clock_offset_days: offsetDays, now: now.toISOString(), note: 'local/demo clock says expired but PayPal does not; nothing changed' } });
+    }, id);
+    return 'blocked';
+  }
   await db.tx(async c => {
     const m = await loadMilestone(c, id, true); const p = (await loadPayment(c, id))!;
     if (!HOLDING.includes(m.state)) return;
     await updatePayment(c, p.id, { status: 'expired' });
-    // No PayPal call: the authorization lapses on its own at day 29 (PayPal sends PAYMENT.AUTHORIZATION.VOIDED).
-    await transition(c, m, 'expired', 'system', { authorization_id: p.current_authorization_id, expires_at: p.expires_at, at: now.toISOString() });
+    await transition(c, m, 'expired', 'system', { authorization_id: p.current_authorization_id, expires_at: p.expires_at, at: now.toISOString(), paypal_authorization_status: ppStatus });
   }, id);
+  return 'expired';
 }
 
 async function warn(db: Db, id: string, now: Date) {

@@ -21,7 +21,7 @@ test('every non-listed transition is illegal', () => {
 });
 test('key illegal jumps', () => {
   for (const [a, b] of [['created', 'captured'], ['authorized', 'captured'], ['proof_submitted', 'captured'], ['rejected', 'captured'],
-    ['verified', 'rejected'], ['captured', 'voided'], ['voided', 'authorized'], ['expired', 'captured'], ['created', 'voided']] as const)
+    ['captured', 'rejected'], ['captured', 'voided'], ['voided', 'authorized'], ['expired', 'captured'], ['created', 'voided']] as const)
     assert.throws(() => assertTransition(a, b), IllegalTransition, `${a}->${b}`);
 });
 test('terminal states have no exits', () => {
@@ -38,4 +38,8 @@ test('requestId is deterministic and distinct per action/attempt', () => {
 test('requestId rejects bad input', () => {
   assert.throws(() => requestId('nope', 'capture', 1));
   assert.throws(() => requestId(M, 'capture', 0));
+});
+
+test('the family may reject after the reviewer verified (verified -> rejected -> voided)', () => {
+  assertTransition('verified', 'rejected'); assertTransition('rejected', 'voided');
 });

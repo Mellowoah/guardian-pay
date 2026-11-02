@@ -1,7 +1,6 @@
 import type { Db } from '../db.js';
 import { audit } from '../audit.js';
-import { clock } from '../clock.js';
-import { evaluate, runChecks, scoreOf, recommend, type Extraction } from './checks.js';
+import { evaluate, runChecks, scoreOf, recommend, untrustedExtraction, normReceipt, type Extraction } from './checks.js';
 import type { Extractor } from './extraction.js';
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
@@ -21,8 +20,8 @@ export class Verifier {
 
   async run(runId: string): Promise<void> {
     const row = (await this.db.query(
-      `SELECT r.status, r.milestone_id, p.bytes, p.has_image, p.content_type, m.case_id, m.expected_form_type, m.expected_document_type,
-              c.created_at AS case_created_at, c.beneficiary_name
+      `SELECT r.status, r.milestone_id, r.proof_id, p.sha256, p.bytes, p.has_image, p.content_type, m.case_id, m.expected_form_type, m.expected_document_type,
+              c.created_at AS case_created_at, c.beneficiary_name, c.clock_offset_days
          FROM verification_runs r JOIN proofs p ON p.id = r.proof_id JOIN milestones m ON m.id = r.milestone_id JOIN cases c ON c.id = m.case_id WHERE r.id = $1`, [runId])).rows[0];
     if (!row || row.status !== 'running') return;
 
@@ -35,8 +34,11 @@ export class Verifier {
         catch (e) { error = clip((e as Error).message); if ((e as any).permanent) break; if (i === 0) await sleep(this.opts.retryDelayMs); }
       }
     }
-    const v = evaluate(extraction, { caseCreatedAt: row.case_created_at, now: clock.now(), beneficiaryName: row.beneficiary_name,
-      expectedFormType: row.expected_form_type, expectedDocumentType: row.expected_document_type });
+    // cross-case reuse: same image bytes, or (when the model read one) the same receipt number, on ANY other milestone
+    const receipt = extraction && !untrustedExtraction(extraction) && extraction.receipt_number ? normReceipt(extraction.receipt_number) : null;
+    const reuse = await this.reuseFor(row.milestone_id, row.proof_id, row.sha256, receipt, !!row.has_image);
+    const v = evaluate(extraction, { caseCreatedAt: row.case_created_at, now: new Date(Date.now() + (row.clock_offset_days || 0) * 86_400_000), beneficiaryName: row.beneficiary_name,
+      expectedFormType: row.expected_form_type, expectedDocumentType: row.expected_document_type, reuse });
     await this.db.tx(async c => {
       const r = await c.query(
         `UPDATE verification_runs SET status='completed', provider=$2, attempts=$3, extraction=$4, checks=$5, score=$6, recommendation=$7, explanation=$8, error=$9, finished_at=now()
@@ -44,8 +46,17 @@ export class Verifier {
         [runId, this.extractor.name, attempts, extraction ? JSON.stringify(extraction) : null, JSON.stringify(v.checks), v.score, v.recommendation, JSON.stringify(v.explanation), error]);
       if (!r.rowCount) return;
       await audit(c, { actor: `ai_proof_check(${this.extractor.name})`, action: 'verification.completed', targetType: 'milestone', targetId: row.milestone_id, caseId: row.case_id,
-        before: null, after: { run_id: runId, recommendation: v.recommendation, score: v.score, highlighted: v.highlighted, extraction_ok: !!extraction, attempts, advisory_only: true } });
+        before: null, after: { run_id: runId, recommendation: v.recommendation, score: v.score, highlighted: v.highlighted, extraction_ok: !!extraction, attempts, reuse: { same_image: reuse.sameImage, same_receipt: reuse.sameReceipt }, advisory_only: true } });
     });
+  }
+
+  private async reuseFor(milestoneId: string, proofId: string, sha: string, receipt: string | null, hasImage: boolean) {
+    if (!hasImage) return { sameImage: 0, sameReceipt: 0, hasImage };
+    const q = await this.db.query(
+      `SELECT count(*) FILTER (WHERE sha256 = $2)::int AS same_image, count(*) FILTER (WHERE $3::text IS NOT NULL AND receipt_number = $3)::int AS same_receipt
+         FROM proof_registry WHERE milestone_id <> $1`, [milestoneId, sha, receipt]);
+    if (receipt) await this.db.query('UPDATE proof_registry SET receipt_number = $2 WHERE proof_id = $1', [proofId, receipt]);
+    return { sameImage: q.rows[0].same_image, sameReceipt: q.rows[0].same_receipt, hasImage };
   }
 
   /** a run can be left 'running' if the process restarted mid-extraction: re-run those */

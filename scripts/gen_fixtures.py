@@ -21,7 +21,7 @@ FIX = [
   ('good_interview_notice', 'good: interview notice', ex('I-130', 'NBC2611122233', '2026-09-14', 'Mateo Reyes', 'interview_notice'), 'interview_notice', 'recommend_approve', 1.0),
   ('forged_blatant', 'forged: bad receipt format, wrong form, future date, name mismatch', ex('I-765', 'EAC-26-1234', '2027-03-10', 'M. Reyez', 'receipt_notice'), 'receipt_notice', 'recommend_reject', 0.25),
   ('forged_subtle', 'forged: everything valid except the beneficiary name', ex('I-130', 'EAC2611998877', '2026-03-02', 'Marco Reyes', 'receipt_notice'), 'receipt_notice', 'needs_human_review', 0.8),
-  ('blurry', 'blurry: unreadable fields, low confidence', ex(None, None, None, None, None, 'blurry', 0.3), 'receipt_notice', 'needs_human_review', 0.5),
+  ('blurry', 'blurry: unreadable fields, low confidence', ex(None, None, None, None, None, 'blurry', 0.3), 'receipt_notice', 'needs_human_review', 0.525),
 ]
 
 def draw(e, label):

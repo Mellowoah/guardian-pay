@@ -7,3 +7,4 @@ cloudflared
 spike/cloudflared
 spike/results.json
 *.log
+.demo-tokens.env

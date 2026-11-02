@@ -7,6 +7,7 @@ import { GuardedPayPal, type Actor } from '../src/guard.js';
 import { Service } from '../src/services.js';
 import { Verifier } from '../src/verify/verifier.js';
 import type { Extractor } from '../src/verify/extraction.js';
+import { authConfigFromEnv, tokenFor } from '../src/auth.js';
 
 export const TEST_URL = process.env.DATABASE_URL_TEST;
 
@@ -98,3 +99,13 @@ export async function toVerified(e: Env) {
   await e.svc.submitProof(e.provider, f.id, { note: 'done' }); await e.svc.verifyProof(e.reviewer, f.id, {});
   return f;
 }
+
+export const TEST_AUTH = authConfigFromEnv({ GP_TOKEN_SECRET: 'test-secret-0123456789abcdef' });
+export const tok = (u: string) => 'Bearer ' + tokenFor(TEST_AUTH, u, 0);
+export const ADMIN: Actor = { userId: null, role: 'system', label: 'admin' };
+/** the family approves exactly the proof on file (what GET /proof shows) */
+export async function approveCur(e: Env, id: string, actor: Actor = e.family, over: Record<string, unknown> = {}) {
+  const r = (await e.db.query('SELECT id, sha256 FROM proofs WHERE milestone_id = $1 ORDER BY created_at DESC, id DESC LIMIT 1', [id])).rows[0];
+  return e.svc.approve(actor, id, { proof_sha256: r?.sha256 ?? '0'.repeat(64), proof_id: r?.id, ...over });
+}
+export const setClock = (e: Env, caseId: string, days: number) => e.svc.setCaseClock(ADMIN, caseId, days, 'test');

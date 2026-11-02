@@ -23,7 +23,8 @@ for (const f of manifest.fixtures) {
   let ex = null, err = '';
   try { ex = await extractor.extract(bytes, 'image/png'); } catch (e) { err = (e as Error).message; }
   const ctx = { caseCreatedAt: new Date(f.context.case_created_at + 'T00:00:00Z'), now, beneficiaryName: f.context.beneficiary_name,
-    expectedFormType: f.context.expected_form_type, expectedDocumentType: f.context.expected_document_type };
+    expectedFormType: f.context.expected_form_type, expectedDocumentType: f.context.expected_document_type,
+    reuse: { sameImage: 0, sameReceipt: 0, hasImage: true } }; // each fixture is evaluated on its own (no earlier use)
   const v = evaluate(ex, ctx);
   const again = evaluate(ex, ctx); // repeatability: same extraction -> same verdict
   const ok = v.recommendation === f.expected_recommendation && v.score === f.expected_score && JSON.stringify(v) === JSON.stringify(again);

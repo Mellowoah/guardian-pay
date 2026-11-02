@@ -161,6 +161,32 @@ export const MIGRATIONS: { id: string; sql: string }[] = [
       finished_at TIMESTAMPTZ
     );
     CREATE INDEX verification_milestone ON verification_runs (milestone_id, started_at DESC);` },
+  { id: '005_safeguards', sql: `
+    -- separation of duties: who verified, who approved, and exactly which proof each decision was about
+    ALTER TABLE users ADD COLUMN token_epoch INT NOT NULL DEFAULT 0;
+    ALTER TABLE approvals ADD COLUMN proof_id UUID REFERENCES proofs(id);
+    ALTER TABLE approvals ADD COLUMN proof_sha256 TEXT;
+    ALTER TABLE milestones ADD COLUMN verified_by INT REFERENCES users(id);
+    ALTER TABLE milestones ADD COLUMN verified_at TIMESTAMPTZ;
+    ALTER TABLE milestones ADD COLUMN verified_proof_sha256 TEXT;
+    ALTER TABLE milestones ADD COLUMN approved_by INT REFERENCES users(id);
+    ALTER TABLE milestones ADD COLUMN approved_at TIMESTAMPTZ;
+    ALTER TABLE milestones ADD COLUMN disputed_at TIMESTAMPTZ;
+    ALTER TABLE milestones ADD COLUMN dispute_note TEXT;
+    -- demo clock is per case (never global)
+    ALTER TABLE cases ADD COLUMN clock_offset_days INT NOT NULL DEFAULT 0 CHECK (clock_offset_days BETWEEN 0 AND 60);
+    -- cross-case proof reuse registry
+    CREATE TABLE proof_registry (
+      id BIGSERIAL PRIMARY KEY,
+      proof_id UUID NOT NULL UNIQUE REFERENCES proofs(id),
+      milestone_id UUID NOT NULL REFERENCES milestones(id),
+      case_id UUID NOT NULL REFERENCES cases(id),
+      sha256 TEXT NOT NULL,
+      receipt_number TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    CREATE INDEX proof_registry_sha ON proof_registry (sha256);
+    CREATE INDEX proof_registry_receipt ON proof_registry (receipt_number) WHERE receipt_number IS NOT NULL;` },
 ];
 
 export async function migrate(db: Db): Promise<string[]> {

@@ -5,11 +5,15 @@ import { createHash } from 'node:crypto';
 import { audit } from './audit.js';
 import type { Verifier } from './verify/verifier.js';
 import { sniffImage } from './verify/extraction.js';
-import { clock, addDays } from './clock.js';
+import { addDays } from './clock.js';
 import { HOLDING } from './state.js';
-import { HttpError, loadMilestone, loadPayment, transition, updatePayment, actorLabel, attemptOf, bumped, type MilestoneRow, type PaymentRow } from './repo.js';
+import { HttpError, loadMilestone, loadPayment, transition, updatePayment, actorLabel, attemptOf, bumped, mNow, caseNow, type MilestoneRow, type PaymentRow } from './repo.js';
 
-const BUYERS = ['family', 'reviewer'];
+/** Only the case's own family funds, approves and (through the guard) captures. A reviewer verifies; it never approves or spends. */
+const assertCaseFamily = (actor: Actor, m: MilestoneRow, what: string) => {
+  if (actor.role !== 'family' || actor.userId === null || actor.userId !== m.family_user_id) throw new HttpError(403, 'forbidden', `only the case's family can ${what}`);
+};
+const SHA_RE = /^[0-9a-f]{64}$/;
 // Sandbox-only demo card (PayPal sandbox test Visa). Clients never send card data; they only ask for the demo card.
 const SANDBOX_CARD = { number: '4111111111111111', expiry: '2030-12', security_code: '123', name: 'Demo Buyer (sandbox)',
   billing_address: { address_line_1: '123 Main St', admin_area_2: 'San Jose', admin_area_1: 'CA', postal_code: '95131', country_code: 'US' } };
@@ -75,7 +79,8 @@ export class Service {
   async getCase(actor: Actor, caseId: string) {
     const cs = await this.assertCaseAccess(actor, caseId);
     const ms = (await this.db.query(
-      `SELECT m.*, row_to_json(p) AS payment FROM milestones m LEFT JOIN payments p ON p.milestone_id = m.id WHERE m.case_id = $1 ORDER BY m.seq`, [caseId])).rows;
+      `SELECT m.*, (SELECT username FROM users WHERE id = m.verified_by) AS verified_by_name, (SELECT username FROM users WHERE id = m.approved_by) AS approved_by_name,
+              row_to_json(p) AS payment FROM milestones m LEFT JOIN payments p ON p.milestone_id = m.id WHERE m.case_id = $1 ORDER BY m.seq`, [caseId])).rows;
     return { id: cs.id, title: cs.title, currency: cs.currency, beneficiary_name: cs.beneficiary_name, case_type: cs.case_type, milestones: ms.map(m => ({ ...publicMilestone(m), payment: m.payment ? publicPayment(m.payment) : null })) };
   }
 
@@ -83,6 +88,36 @@ export class Service {
     await this.assertCaseAccess(actor, caseId);
     const rows = (await this.db.query('SELECT id, at, actor, action, target_type, target_id, before, after FROM audit_log WHERE case_id = $1 ORDER BY id', [caseId])).rows;
     return { case_id: caseId, count: rows.length, entries: rows };
+  }
+
+  // ------------------------------------------------------------------ admin (demo clock is per case, admin only, audited)
+  async getCaseClock(caseId: string) {
+    if (!/^[0-9a-f-]{36}$/i.test(caseId)) throw new HttpError(404, 'not_found', 'case not found');
+    const r = (await this.db.query('SELECT clock_offset_days FROM cases WHERE id = $1', [caseId])).rows[0];
+    if (!r) throw new HttpError(404, 'not_found', 'case not found');
+    return { case_id: caseId, offset_days: r.clock_offset_days, now: caseNow(r.clock_offset_days).toISOString() };
+  }
+  async setCaseClock(admin: Actor, caseId: string, days: unknown, reason: unknown) {
+    const d = Number(days);
+    if (!Number.isInteger(d) || d < 0 || d > 60) throw new HttpError(400, 'bad_request', 'offset_days must be an integer 0-60');
+    if (admin.role !== 'system') throw new HttpError(403, 'forbidden', 'admin only');
+    if (!/^[0-9a-f-]{36}$/i.test(caseId)) throw new HttpError(404, 'not_found', 'case not found');
+    return this.db.tx(async c => {
+      const r = (await c.query('SELECT clock_offset_days FROM cases WHERE id = $1 FOR UPDATE', [caseId])).rows[0];
+      if (!r) throw new HttpError(404, 'not_found', 'case not found');
+      await c.query('UPDATE cases SET clock_offset_days = $2 WHERE id = $1', [caseId, d]);
+      await audit(c, { actor: actorLabel(admin), action: 'admin.clock_set', targetType: 'case', targetId: caseId, caseId, before: { offset_days: r.clock_offset_days },
+        after: { offset_days: d, now: caseNow(d).toISOString(), reason: typeof reason === 'string' ? reason.slice(0, 200) : null,
+          note: 'demo clock for THIS case only; PayPal still uses real time; an authorization is only ever marked expired if PayPal agrees' } });
+      return { case_id: caseId, offset_days: d, now: caseNow(d).toISOString() };
+    });
+  }
+  async revokeUserToken(admin: Actor, username: string) {
+    if (admin.role !== 'system') throw new HttpError(403, 'forbidden', 'admin only');
+    const r = (await this.db.query('UPDATE users SET token_epoch = token_epoch + 1 WHERE username = $1 RETURNING id, token_epoch', [username])).rows[0];
+    if (!r) throw new HttpError(404, 'not_found', 'unknown user');
+    await audit(this.db.pool, { actor: actorLabel(admin), action: 'admin.token_revoked', targetType: 'user', targetId: String(r.id), before: null, after: { username, token_epoch: r.token_epoch } });
+    return { username, token_epoch: r.token_epoch, note: 'the previous derived token no longer works; GP_TOKEN_<USER> env tokens are rotated by changing the env' };
   }
 
   // ------------------------------------------------------------------ funding
@@ -108,7 +143,7 @@ export class Service {
     if (body?.payment_source && !['card', 'paypal'].includes(body.payment_source)) throw new HttpError(400, 'bad_request', 'payment_source must be card or paypal');
     const pre = await this.db.tx(async c => {
       const m = await loadMilestone(c, milestoneId, true);
-      if (!BUYERS.includes(actor.role)) throw new HttpError(403, 'forbidden', `role ${actor.role} may not fund a milestone`);
+      assertCaseFamily(actor, m, 'fund a milestone');
       let p = await loadPayment(c, m.id);
       if (m.state !== 'created') throw new HttpError(409, 'conflict', `milestone is ${m.state}`);
       if (p?.status === 'order_created') { if (useCard) throw new HttpError(409, 'conflict', 'a PayPal-wallet order already exists for this milestone'); return { m, p, existing: true }; }
@@ -148,7 +183,7 @@ export class Service {
   async authorizeWallet(actor: Actor, milestoneId: string): Promise<any> {
     const pre = await this.db.tx(async c => {
       const m = await loadMilestone(c, milestoneId, true); const p = await loadPayment(c, m.id);
-      if (!BUYERS.includes(actor.role)) throw new HttpError(403, 'forbidden', `role ${actor.role} may not authorize`);
+      assertCaseFamily(actor, m, 'authorize a milestone');
       if (m.state !== 'created') { if (p && ['authorized', 'reauthorized'].includes(p.status)) return { m, p, done: true }; throw new HttpError(409, 'conflict', `milestone is ${m.state}`); }
       if (!p || p.status !== 'order_created' || !p.paypal_order_id) throw new HttpError(409, 'conflict', 'create an order with payment_source=paypal first');
       return { m, p, done: false };
@@ -169,7 +204,7 @@ export class Service {
   private async applyAuthorized(c: import('pg').PoolClient, actor: Actor, milestoneId: string, orderId: string, auth: any) {
     const m = await loadMilestone(c, milestoneId, true); const p = (await loadPayment(c, milestoneId))!;
     if (m.state === 'created') {
-      const now = clock.now();
+      const now = mNow(m);
       await updatePayment(c, p.id, { paypal_order_id: orderId, original_authorization_id: auth.id, current_authorization_id: auth.id, authorized_at: now,
         honor_until: addDays(now, 3), expires_at: addDays(now, 29), status: 'authorized', last_error: null });
       await transition(c, m, 'authorized', actorLabel(actor), { order_id: orderId, authorization_id: auth.id, amount: m.amount });
@@ -199,15 +234,17 @@ export class Service {
       if (actor.role !== 'provider' || actor.userId !== m.provider_user_id) throw new HttpError(403, 'forbidden', 'only the case provider can submit proof');
       if (m.state === 'proof_submitted') return { milestone: publicMilestone(m), idempotent: true as const };
       const text = note || `image proof uploaded${file?.filename ? ` (${file.filename})` : ''}`;
-      await transition(c, m, 'proof_submitted', actorLabel(actor), { note_length: text.length, proof_sha256: file?.sha ?? null }, { proof_note: text, proof_submitted_at: clock.now() });
+      await transition(c, m, 'proof_submitted', actorLabel(actor), { note_length: text.length, proof_sha256: file?.sha ?? null }, { proof_note: text, proof_submitted_at: mNow(m) });
       m.proof_note = text;
-      if (!this.opts.verifier) return { milestone: publicMilestone(m) };
       const sha = file?.sha ?? createHash('sha256').update(text).digest('hex');
       const proof = (await c.query(`INSERT INTO proofs (milestone_id, uploaded_by, filename, content_type, size_bytes, sha256, has_image, bytes) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`,
         [m.id, actor.userId, file?.filename ?? null, file?.mime ?? 'text/plain', file?.bytes.length ?? text.length, sha, !!file, file?.bytes ?? null])).rows[0];
+      // cross-case reuse registry: every image proof is recorded by hash (receipt number is added once extracted)
+      if (file) await c.query('INSERT INTO proof_registry (proof_id, milestone_id, case_id, sha256) VALUES ($1,$2,$3,$4)', [proof.id, m.id, m.case_id, sha]);
+      const info = { id: proof.id, sha256: sha, has_image: !!file, size_bytes: file?.bytes.length ?? text.length };
+      if (!this.opts.verifier) return { milestone: publicMilestone(m), proof: info };
       const run = (await c.query(`INSERT INTO verification_runs (proof_id, milestone_id, provider) VALUES ($1,$2,$3) RETURNING id`, [proof.id, m.id, this.opts.verifier.provider])).rows[0];
-      return { milestone: publicMilestone(m), proof: { id: proof.id, sha256: sha, has_image: !!file, size_bytes: file?.bytes.length ?? text.length },
-        verification: { run_id: run.id, status: 'running', advisory_only: true } };
+      return { milestone: publicMilestone(m), proof: info, verification: { run_id: run.id, status: 'running', advisory_only: true } };
     }, milestoneId);
     if ('verification' in out && out.verification && this.opts.verifier) this.opts.verifier.start(out.verification.run_id);
     return out;
@@ -222,30 +259,66 @@ export class Service {
     return { milestone_id: m.id, milestone_state: m.state, ...v };
   }
 
+  /** The reviewer VERIFIES the proof. This is not an approval: only the case's family approves, and it cannot be the same person. */
   async verifyProof(actor: Actor, milestoneId: string, body: any) {
     const note = str(body?.note, 1000, 'note', false);
     return this.db.tx(async c => {
       const m = await loadMilestone(c, milestoneId, true);
       if (actor.role !== 'reviewer') throw new HttpError(403, 'forbidden', 'only a reviewer can verify proof');
       if (m.state === 'verified') return { milestone: publicMilestone(m), idempotent: true };
-      await transition(c, m, 'verified', actorLabel(actor), { note }, { verified_note: note || null });
+      const proof = await latestProof(c, m.id);
+      if (!proof) throw new HttpError(409, 'conflict', 'no proof is on file for this milestone');
+      await transition(c, m, 'verified', actorLabel(actor), { note, verified_by: actor.label, proof_id: proof.id, proof_sha256: proof.sha256 },
+        { verified_note: note || null, verified_by: actor.userId, verified_at: new Date(), verified_proof_sha256: proof.sha256 });
+      m.verified_by = actor.userId; m.verified_by_name = actor.label;
       return { milestone: publicMilestone(m) };
     }, milestoneId);
   }
 
+  /** What the family/reviewer/provider are looking at: the proof on file, with the sha256 an approval must be bound to. */
+  async currentProof(actor: Actor, milestoneId: string) {
+    const m = await loadMilestone(this.db.pool, milestoneId);
+    await this.assertCaseAccess(actor, m.case_id);
+    const r = await latestProof(this.db.pool, m.id);
+    if (!r) throw new HttpError(404, 'not_found', 'no proof has been submitted for this milestone');
+    return { milestone_id: m.id, milestone_state: m.state, proof_id: r.id, sha256: r.sha256, size_bytes: r.size_bytes, filename: r.filename, content_type: r.content_type,
+      has_image: r.has_image, image_available: r.has_image && !r.bytes_deleted_at, image_url: r.has_image ? `/api/milestones/${m.id}/proof/image` : null, submitted_at: r.created_at,
+      verified_by: m.verified_by_name ?? null, verified_proof_sha256: m.verified_proof_sha256 ?? null,
+      approve_with: { proof_id: r.id, proof_sha256: r.sha256, note: 'POST /approve must send the proof_sha256 you were shown; if the proof changed the approval is refused' } };
+  }
+
+  /** Proof image bytes: reviewer, or the family that owns the case. Never the public, never another family. */
+  async proofImage(actor: Actor, milestoneId: string): Promise<{ bytes: Buffer; mime: string; sha256: string }> {
+    const m = await loadMilestone(this.db.pool, milestoneId);
+    if (actor.role === 'family') assertCaseFamily(actor, m, 'view this proof image');
+    else if (actor.role !== 'reviewer') throw new HttpError(403, 'forbidden', 'only the case family or a reviewer can view the proof image');
+    const r = await latestProof(this.db.pool, m.id);
+    if (!r || !r.has_image) throw new HttpError(404, 'not_found', 'no proof image for this milestone');
+    if (!r.bytes) throw new HttpError(410, 'gone', 'the proof image was deleted after the decision (the sha256 hash and audit trail remain)');
+    return { bytes: r.bytes as Buffer, mime: r.content_type, sha256: r.sha256 };
+  }
+
   // ------------------------------------------------------------------ approve -> capture
-  async approve(actor: Actor, milestoneId: string): Promise<any> {
+  /** The case's FAMILY approves the exact proof it was shown ({proof_sha256}); that approval, bound to the verified proof, is what lets the guard capture. */
+  async approve(actor: Actor, milestoneId: string, body: any = {}): Promise<any> {
+    const seen = typeof body?.proof_sha256 === 'string' ? body.proof_sha256.toLowerCase() : '';
+    if (!SHA_RE.test(seen)) throw new HttpError(400, 'bad_request', 'proof_sha256 is required: approve the proof you were shown (GET /api/milestones/:id/proof)');
+    const seenId = typeof body?.proof_id === 'string' ? body.proof_id : null;
     const pre = await this.db.tx(async c => {
       const m = await loadMilestone(c, milestoneId, true); const p = await loadPayment(c, m.id);
-      if (!BUYERS.includes(actor.role)) throw new HttpError(403, 'forbidden', `role ${actor.role} may not approve`);
-      if (actor.userId === m.provider_user_id) throw new HttpError(403, 'forbidden', 'a provider cannot approve its own milestone');
+      assertCaseFamily(actor, m, 'approve a milestone');
       if (m.state === 'captured') return { m, p, done: true };
       if (m.state !== 'verified') throw new HttpError(409, 'conflict', `milestone must be verified to approve (is ${m.state})`);
       if (!p?.current_authorization_id) throw new HttpError(409, 'conflict', 'no authorization on this milestone');
-      const have = (await c.query(`SELECT 1 FROM approvals WHERE milestone_id=$1 AND user_id=$2 AND decision='approve'`, [m.id, actor.userId])).rowCount;
+      const proof = await latestProof(c, m.id);
+      if (!proof || proof.sha256 !== seen || (seenId && seenId !== proof.id)) throw new HttpError(409, 'stale_proof', 'the proof on file is not the one you approved; look at the current proof and approve again', { current_proof_sha256: proof?.sha256 ?? null });
+      if (m.verified_proof_sha256 !== proof.sha256) throw new HttpError(409, 'proof_not_verified', 'the proof on file was not the one the reviewer verified');
+      const have = (await c.query(`SELECT 1 FROM approvals WHERE milestone_id=$1 AND user_id=$2 AND decision='approve' AND proof_sha256=$3`, [m.id, actor.userId, proof.sha256])).rowCount;
       if (!have) {
-        await c.query(`INSERT INTO approvals (milestone_id, user_id, decision) VALUES ($1,$2,'approve')`, [m.id, actor.userId]);
-        await audit(c, { actor: actorLabel(actor), action: 'approval.approve', targetType: 'milestone', targetId: m.id, caseId: m.case_id, before: null, after: { decision: 'approve' } });
+        await c.query(`INSERT INTO approvals (milestone_id, user_id, decision, proof_id, proof_sha256) VALUES ($1,$2,'approve',$3,$4)`, [m.id, actor.userId, proof.id, proof.sha256]);
+        await c.query('UPDATE milestones SET approved_by = $2, approved_at = now() WHERE id = $1', [m.id, actor.userId]);
+        await audit(c, { actor: actorLabel(actor), action: 'approval.approve', targetType: 'milestone', targetId: m.id, caseId: m.case_id, before: null,
+          after: { decision: 'approve', approved_by: actor.label, verified_by: m.verified_by_name, proof_id: proof.id, proof_sha256: proof.sha256 } });
       }
       return { m, p, done: false };
     }, milestoneId);
@@ -280,18 +353,21 @@ export class Service {
   }
 
   // ------------------------------------------------------------------ reject -> void
+  /** Reject/dispute -> void. The family can do this in proof_submitted AND after the reviewer verified; a reviewer can only reject unverified proof. */
   async reject(actor: Actor, milestoneId: string, body: any): Promise<any> {
     const reason = str(body?.reason, 500, 'reason');
     const pre = await this.db.tx(async c => {
       const m = await loadMilestone(c, milestoneId, true); const p = await loadPayment(c, m.id);
-      if (!BUYERS.includes(actor.role)) throw new HttpError(403, 'forbidden', `role ${actor.role} may not reject`);
-      if (actor.userId === m.provider_user_id) throw new HttpError(403, 'forbidden', 'a provider cannot reject its own milestone');
+      if (actor.role === 'family') assertCaseFamily(actor, m, 'reject a milestone');
+      else if (actor.role !== 'reviewer') throw new HttpError(403, 'forbidden', `role ${actor.role} may not reject`);
       if (m.state === 'voided') return { m, p, done: true };
-      if (m.state === 'proof_submitted') {
-        await c.query(`INSERT INTO approvals (milestone_id, user_id, decision, reason) VALUES ($1,$2,'reject',$3)`, [m.id, actor.userId, reason]);
-        await audit(c, { actor: actorLabel(actor), action: 'approval.reject', targetType: 'milestone', targetId: m.id, caseId: m.case_id, before: null, after: { decision: 'reject', reason } });
-        await transition(c, m, 'rejected', actorLabel(actor), { reason }, { rejection_reason: reason });
-      } else if (m.state !== 'rejected') throw new HttpError(409, 'conflict', `milestone must be proof_submitted to reject (is ${m.state})`);
+      if (m.state === 'proof_submitted' || (m.state === 'verified' && actor.role === 'family')) {
+        const proof = await latestProof(c, m.id);
+        await c.query(`INSERT INTO approvals (milestone_id, user_id, decision, reason, proof_id, proof_sha256) VALUES ($1,$2,'reject',$3,$4,$5)`, [m.id, actor.userId, reason, proof?.id ?? null, proof?.sha256 ?? null]);
+        await audit(c, { actor: actorLabel(actor), action: 'approval.reject', targetType: 'milestone', targetId: m.id, caseId: m.case_id, before: null,
+          after: { decision: 'reject', reason, after_verification: m.state === 'verified', proof_sha256: proof?.sha256 ?? null } });
+        await transition(c, m, 'rejected', actorLabel(actor), { reason, from: m.state }, { rejection_reason: reason });
+      } else if (m.state !== 'rejected') throw new HttpError(409, 'conflict', `milestone must be proof_submitted (or verified, by the family) to reject (is ${m.state})`);
       if (!p?.original_authorization_id) throw new HttpError(409, 'conflict', 'no authorization on this milestone');
       return { m, p, done: false };
     }, milestoneId);
@@ -314,10 +390,16 @@ export class Service {
   }
 }
 
+type Q = Pick<import('pg').PoolClient, 'query'>;
+async function latestProof(q: Q, milestoneId: string) {
+  return (await q.query('SELECT id, sha256, size_bytes, filename, content_type, has_image, bytes, bytes_deleted_at, created_at FROM proofs WHERE milestone_id = $1 ORDER BY created_at DESC, id DESC LIMIT 1', [milestoneId])).rows[0] as
+    { id: string; sha256: string; size_bytes: number; filename: string | null; content_type: string; has_image: boolean; bytes: Buffer | null; bytes_deleted_at: Date | null; created_at: Date } | undefined;
+}
 export const HOLDING_STATES = HOLDING;
 export const publicMilestone = (m: any) => ({ id: m.id, case_id: m.case_id, seq: m.seq, title: m.title, amount: m.amount, state: m.state,
   expected_form_type: m.expected_form_type ?? null, expected_document_type: m.expected_document_type ?? null,
-  proof_note: m.proof_note ?? null, rejection_reason: m.rejection_reason ?? null });
+  proof_note: m.proof_note ?? null, rejection_reason: m.rejection_reason ?? null,
+  verified_by: m.verified_by_name ?? null, approved_by: m.approved_by_name ?? null, disputed: !!m.disputed_at, dispute_note: m.dispute_note ?? null });
 export const publicPayment = (p: any) => ({ id: p.id, status: p.status, amount: p.amount, currency: p.currency, order_id: p.paypal_order_id,
   original_authorization_id: p.original_authorization_id, current_authorization_id: p.current_authorization_id, authorized_at: p.authorized_at,
   reauthorized_at: p.reauthorized_at, honor_until: p.honor_until, expires_at: p.expires_at, capture_id: p.capture_id, reauth_count: p.reauth_count,
