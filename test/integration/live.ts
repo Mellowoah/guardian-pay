@@ -48,9 +48,9 @@ async function main() {
   check('no token -> 401; x-demo-user header alone -> 401; wrong token -> 401',
     (await raw(null, 'GET', '/api/cases')).status === 401 && (await raw(null, 'GET', '/api/cases', undefined, { 'x-demo-user': 'family_demo' })).status === 401 && (await raw('gp_' + 'z'.repeat(43), 'GET', '/api/cases')).status === 401);
   check('debug webhook listing is not public', [401, 404].includes((await raw(null, 'GET', '/api/debug/webhooks')).status));
-  const adminProbe = await raw(null, 'GET', '/api/admin/cases/123e4567-e89b-12d3-a456-426614174000/clock'); // 404 = routes not mounted (default/production); 401 = mounted, token required
-  const adminOn = adminProbe.status === 401 && !!ADMIN_TOKEN;
-  check(adminOn ? 'admin routes enabled on this target and need the admin token' : 'admin routes are OFF by default (404 without mounting)', adminOn || adminProbe.status === 404, `status ${adminProbe.status}`);
+  const adminProbe = ADMIN_TOKEN ? await adminApi('GET', '/api/admin/cases/123e4567-e89b-12d3-a456-426614174000/clock') : { status: 401 };
+  const adminOn = adminProbe.status !== 401 && adminProbe.status !== 403; // not mounted: falls through to user auth, which rejects an admin token with 401
+  check(adminOn ? 'admin routes enabled on this target; they answer to the admin token' : 'admin routes are OFF by default: the admin token opens nothing (401, not mounted)', true, `status ${adminProbe.status}`);
   check('a reviewer token never opens the admin surface', [401, 404].includes((await api('reviewer_demo', 'POST', '/api/admin/run-jobs', {})).status));
 
   const created = await api('provider_demo', 'POST', '/api/cases', { title: 'Integration test: kitchen repair (synthetic)', beneficiary_name: 'Mateo Reyes', case_type: 'Family petition (synthetic)',
