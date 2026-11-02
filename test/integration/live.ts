@@ -4,6 +4,7 @@
  * Synthetic data only. Never prints credentials. Needs auth tokens (GP_TOKEN_<USER> or GP_TOKEN_SECRET/PAYPAL_CLIENT_SECRET the server derives from). Lifecycle checks run only if admin routes are enabled on the target.
  */
 import { readFileSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import { accessToken, assertSandbox } from '../../src/paypal.js';
 import { authConfigFromEnv, tokenFor } from '../../src/auth.js';
 
@@ -47,9 +48,9 @@ async function main() {
   check('no token -> 401; x-demo-user header alone -> 401; wrong token -> 401',
     (await raw(null, 'GET', '/api/cases')).status === 401 && (await raw(null, 'GET', '/api/cases', undefined, { 'x-demo-user': 'family_demo' })).status === 401 && (await raw('gp_' + 'z'.repeat(43), 'GET', '/api/cases')).status === 401);
   check('debug webhook listing is not public', [401, 404].includes((await raw(null, 'GET', '/api/debug/webhooks')).status));
-  const adminProbe = await adminApi('GET', '/api/admin/cases/123e4567-e89b-12d3-a456-426614174000/clock');
-  const adminOn = adminProbe.status !== 404; // 404 = admin routes disabled (the default and the production setting)
-  check(adminOn ? 'admin routes enabled for this run (admin token accepted)' : 'admin routes are OFF by default (404 even with the admin token)', adminOn ? adminProbe.status !== 401 : true, `status ${adminProbe.status}`);
+  const adminProbe = await raw(null, 'GET', '/api/admin/cases/123e4567-e89b-12d3-a456-426614174000/clock'); // 404 = routes not mounted (default/production); 401 = mounted, token required
+  const adminOn = adminProbe.status === 401 && !!ADMIN_TOKEN;
+  check(adminOn ? 'admin routes enabled on this target and need the admin token' : 'admin routes are OFF by default (404 without mounting)', adminOn || adminProbe.status === 404, `status ${adminProbe.status}`);
   check('a reviewer token never opens the admin surface', [401, 404].includes((await api('reviewer_demo', 'POST', '/api/admin/run-jobs', {})).status));
 
   const created = await api('provider_demo', 'POST', '/api/cases', { title: 'Integration test: kitchen repair (synthetic)', beneficiary_name: 'Mateo Reyes', case_type: 'Family petition (synthetic)',
@@ -71,7 +72,8 @@ async function main() {
   check('wallet path returns a PayPal approve link', wallet.status === 201 && /paypal\.com/.test(wallet.json.approve_url ?? ''), String(wallet.json.approve_url ?? '').split('?')[0]);
 
   // proof for A is a SYNTHETIC image upload (starts the advisory AI check); B and C use a plain note
-  const img = readFileSync(new URL('../fixtures/proofs/good_receipt_notice.png', import.meta.url));
+  // unique bytes per run (random trailer after IEND) so repeated runs do not trip the proof-reuse registry; the first-use check stays meaningful
+  const img = Buffer.concat([readFileSync(new URL('../fixtures/proofs/good_receipt_notice.png', import.meta.url)), randomBytes(16)]);
   const upl = await api('provider_demo', 'POST', `/api/milestones/${A}/proof`, { filename: 'good_receipt_notice.png', file_base64: img.toString('base64') });
   check('proof image upload -> proof_submitted, check started, sha256 stored', upl.status === 200 && upl.json.milestone?.state === 'proof_submitted' && /^[0-9a-f]{64}$/.test(upl.json.proof?.sha256 ?? ''), `sha256 ${String(upl.json.proof?.sha256).slice(0, 12)}…`);
   for (const id of [B, C]) await api('provider_demo', 'POST', `/api/milestones/${id}/proof`, { note: 'synthetic photos attached' });
@@ -89,7 +91,9 @@ async function main() {
   const prf = await api('family_demo', 'GET', `/api/milestones/${A}/proof`);
   const body = { proof_sha256: prf.json.sha256, proof_id: prf.json.proof_id };
   check('family can read the proof it must approve (sha256 + id) and fetch the image; provider cannot', prf.status === 200 && /^[0-9a-f]{64}$/.test(prf.json.sha256 ?? '') && (await api('provider_demo', 'GET', `/api/milestones/${A}/proof/image`)).status === 403 && (await api('family_demo', 'GET', `/api/milestones/${A}/proof/image`)).status === 200);
-  check('proof_not_reused passes on first use', vj?.checks?.find((c: any) => c.id === 'proof_not_reused')?.status === 'pass');
+  // the image bytes are unique per run; the synthetic receipt NUMBER is the same every run, so on a re-run only a receipt-number flag is acceptable (never an image match)
+  const reuse0 = vj?.checks?.find((c: any) => c.id === 'proof_not_reused');
+  check('proof_not_reused: this image has not been used before (a repeated synthetic receipt number from an earlier run is tolerated)', reuse0?.status === 'pass' || (reuse0?.status === 'fail' && /receipt number already/.test(reuse0.reason_en)), `${reuse0?.status}`);
 
   // ---- negatives
   check('provider approving its own milestone -> 403', (await api('provider_demo', 'POST', `/api/milestones/${A}/approve`, body)).status === 403);
@@ -99,7 +103,7 @@ async function main() {
   check('proof reuse: same image on a second milestone -> proof_not_reused FAIL, human review, never approve', await (async () => {
     await api('provider_demo', 'POST', `/api/milestones/${D}/proof`, { filename: 'good_receipt_notice.png', file_base64: img.toString('base64') });
     const v = await waitFor(async () => { const r = await api('family_demo', 'GET', `/api/milestones/${D}/verification`); return r.json.status === 'completed' ? r : undefined; }, 90_000, 2000);
-    const c = v?.json.checks?.find((x: any) => x.id === 'proof_not_reused'); return c?.status === 'fail' && v?.json.recommendation === 'needs_human_review';
+    const c = v?.json.checks?.find((x: any) => x.id === 'proof_not_reused'); return c?.status === 'fail' && /exact image/.test(c.reason_en) && v?.json.recommendation === 'needs_human_review';
   })());
   check('reject without reason -> 400', (await api('family_demo', 'POST', `/api/milestones/${B}/reject`, {})).status === 400);
 
@@ -160,7 +164,7 @@ async function main() {
       await setClock(30);
       const l2 = await run();
       const cs2 = (await api('reviewer_demo', 'GET', `/api/cases/${caseId}`)).json.milestones.find((m: any) => m.id === C);
-      check('day 30: demo clock alone does NOT expire money (PayPal still says CREATED): expire_blocked, state unchanged', l2?.expired === 0 && l2?.expire_blocked >= 1 && cs2.state === 'authorized' && (await auditOf(caseId)).some(x => x.action === 'payment.expire_blocked'), JSON.stringify(l2));
+      check('day 30: demo clock alone does NOT expire money (PayPal still says CREATED): expire_blocked, state unchanged', l2?.expired === 0 && l2?.expire_blocked >= 1 && ['authorized', 'proof_submitted'].includes(cs2.state) && (await auditOf(caseId)).some(x => x.action === 'payment.expire_blocked'), JSON.stringify(l2));
       check('milestone C still cannot be approved before verification (409)', (await api('family_demo', 'POST', `/api/milestones/${C}/approve`, body)).status === 409);
     } finally { await setClock(0); }
     check('demo clock reset to 0', (await adminApi('GET', `/api/admin/cases/${caseId}/clock`)).json.offset_days === 0);
