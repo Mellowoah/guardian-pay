@@ -187,6 +187,82 @@ export const MIGRATIONS: { id: string; sql: string }[] = [
     );
     CREATE INDEX proof_registry_sha ON proof_registry (sha256);
     CREATE INDEX proof_registry_receipt ON proof_registry (receipt_number) WHERE receipt_number IS NOT NULL;` },
+  { id: '006_payee_verification', sql: `
+    ALTER TABLE providers ADD COLUMN practitioner_type TEXT NOT NULL DEFAULT 'none' CHECK (practitioner_type IN ('recognized_org_rep','attorney','none'));
+    ALTER TABLE providers ADD COLUMN person_name TEXT;
+    ALTER TABLE providers ADD COLUMN org_name TEXT;
+    ALTER TABLE providers ADD COLUMN practice_state TEXT;
+    ALTER TABLE providers ADD COLUMN bar_number TEXT;
+    UPDATE providers SET business_name = 'Guardian Demo Legal Aid (synthetic)', practitioner_type = 'recognized_org_rep',
+           person_name = 'Dana Demorep', org_name = 'Guardian Demo Legal Aid (SYNTHETIC)', practice_state = 'Florida'
+      WHERE user_id = (SELECT id FROM users WHERE username = 'provider_demo');
+    UPDATE providers SET practitioner_type = 'none', person_name = 'Pat Notario (synthetic)'
+      WHERE user_id = (SELECT id FROM users WHERE username = 'provider_two');
+    -- PayPal seller onboarding (Partner Referrals). tracking_id = our provider id. merchant_id is PayPal's id for the seller (or a SIMULATED id).
+    CREATE TABLE provider_onboarding (
+      provider_id INT PRIMARY KEY REFERENCES providers(id),
+      tracking_id TEXT NOT NULL UNIQUE,
+      action_url TEXT,
+      referral_mode TEXT CHECK (referral_mode IN ('live','simulated')),
+      merchant_id TEXT,
+      consent_revoked_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    -- SIMULATED sandbox merchant ids (prefix SIMOK = ready to receive; SIMBAD = not ready). No real PayPal account behind them.
+    INSERT INTO provider_onboarding (provider_id, tracking_id, referral_mode, merchant_id)
+      SELECT p.id, 'gp-provider-' || p.id, 'simulated', CASE u.username WHEN 'provider_demo' THEN 'SIMOKDEMO0001' ELSE 'SIMBADTWO0001' END
+      FROM providers p JOIN users u ON u.id = p.user_id;
+    -- append-only snapshots of every payee verification (both checks, with time and mode)
+    CREATE TABLE provider_verifications (
+      id BIGSERIAL PRIMARY KEY,
+      provider_id INT NOT NULL REFERENCES providers(id),
+      merchant_id TEXT,
+      paypal_mode TEXT NOT NULL CHECK (paypal_mode IN ('live','simulated','none')),
+      paypal_status TEXT NOT NULL,
+      practice_status TEXT NOT NULL,
+      verified BOOLEAN NOT NULL,
+      checks JSONB NOT NULL,
+      paypal_snapshot JSONB,
+      registry_dates JSONB,
+      trigger_note TEXT,
+      checked_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    CREATE INDEX provider_verifications_latest ON provider_verifications (provider_id, merchant_id, id DESC);
+    CREATE TRIGGER provider_verifications_append_only BEFORE UPDATE OR DELETE ON provider_verifications FOR EACH ROW EXECUTE FUNCTION audit_log_immutable();
+    ALTER TABLE cases ADD COLUMN payee_merchant_id TEXT;
+    ALTER TABLE cases ADD COLUMN payee_mode TEXT CHECK (payee_mode IN ('live','simulated'));
+    ALTER TABLE cases ADD COLUMN payee_bound_at TIMESTAMPTZ;
+    ALTER TABLE payments ADD COLUMN payee_merchant_id TEXT;
+    ALTER TABLE payments ADD COLUMN payee_mode TEXT;
+    -- Immutable payee binding: once set, the merchant id (and its mode) change only inside an approved payee-change transaction.
+    CREATE FUNCTION cases_payee_immutable() RETURNS trigger AS $$
+    BEGIN
+      IF OLD.payee_merchant_id IS NOT NULL
+         AND (NEW.payee_merchant_id IS DISTINCT FROM OLD.payee_merchant_id OR NEW.payee_mode IS DISTINCT FROM OLD.payee_mode)
+         AND COALESCE(current_setting('gp.payee_change', true), '') <> 'approved' THEN
+        RAISE EXCEPTION 'payee binding is immutable (change requires re-verification, cooling delay and family approval)';
+      END IF;
+      RETURN NEW;
+    END; $$ LANGUAGE plpgsql;
+    CREATE TRIGGER cases_payee_immutable BEFORE UPDATE ON cases FOR EACH ROW EXECUTE FUNCTION cases_payee_immutable();
+    CREATE TABLE payee_change_requests (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      case_id UUID NOT NULL REFERENCES cases(id),
+      old_merchant_id TEXT,
+      new_merchant_id TEXT NOT NULL,
+      new_mode TEXT NOT NULL CHECK (new_mode IN ('live','simulated')),
+      requested_by TEXT NOT NULL,
+      requested_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      effective_after TIMESTAMPTZ NOT NULL,
+      verification_id BIGINT REFERENCES provider_verifications(id),
+      family_approved_by INT REFERENCES users(id),
+      family_approved_at TIMESTAMPTZ,
+      status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','approved','applied','cancelled')),
+      resolved_at TIMESTAMPTZ,
+      note TEXT
+    );
+    CREATE UNIQUE INDEX payee_change_one_open ON payee_change_requests (case_id) WHERE status IN ('pending','approved');` },
 ];
 
 export async function migrate(db: Db): Promise<string[]> {

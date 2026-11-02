@@ -1,0 +1,10 @@
+{
+  "simulated": true,
+  "note": "SIMULATED bar lookup. Fixture records only; no live Florida Bar (or any bar) data is fetched, copied or republished. Verify real attorneys on the official lookup.",
+  "lookup_url": "https://www.floridabar.org/directories/find-mbr/",
+  "members": [
+    { "state": "Florida", "bar_number": "SIM-100001", "name": "Alex Demolawyer", "status": "eligible" },
+    { "state": "Florida", "bar_number": "SIM-100002", "name": "Sam Suspended", "status": "suspended" },
+    { "state": "Florida", "bar_number": "SIM-100003", "name": "Retired Rita", "status": "inactive" }
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "synthetic": true,
+  "note": "SYNTHETIC records for the sandbox demo only. These are not real organizations or people and are not in any EOIR list.",
+  "organizations": [
+    { "name": "Guardian Demo Legal Aid (SYNTHETIC)", "recognized": "2024-01-15", "expires": "2030-01-15", "pending_renewal": false, "status": "Active" }
+  ],
+  "representatives": [
+    { "name": "Demorep, Dana", "acc_exp": "2028-06-30", "acc_pending": false, "rep_status": "Active", "org": "Guardian Demo Legal Aid (SYNTHETIC)", "org_recognized": "2024-01-15", "org_exp": "2030-01-15", "org_pending": false, "org_status": "Active", "dhs_only": false }
+  ],
+  "disciplined_current": [
+    { "name": "Pat Notario (synthetic)", "place": "Florida", "immediate_suspension": "", "final_discipline": "Disbarred (SYNTHETIC demo record)", "effective": "2024-03-01", "reinstated": "No" }
+  ]
+}

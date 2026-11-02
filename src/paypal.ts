@@ -73,6 +73,12 @@ export class PayPalClient {
   // --- reads (no money moves) ---
   getAuthorization(authId: string) { return this.call('GET', `/v2/payments/authorizations/${enc(authId)}`); }
   getOrder(orderId: string) { return this.call('GET', `/v2/checkout/orders/${enc(orderId)}`); }
+
+  // --- seller onboarding (Partner Referrals). No money moves; these never create orders or payments. ---
+  createPartnerReferral(body: unknown) { return this.call('POST', '/v2/customer/partner-referrals', body); }
+  /** looks a seller up by OUR tracking id (= provider id); returns { merchant_id, ... } once the seller finished PayPal's hosted onboarding */
+  getMerchantByTracking(partnerId: string, trackingId: string) { return this.call('GET', `/v1/customer/partners/${enc(partnerId)}/merchant-integrations?tracking_id=${enc(trackingId)}`); }
+  getMerchantStatus(partnerId: string, merchantId: string) { return this.call('GET', `/v1/customer/partners/${enc(partnerId)}/merchant-integrations/${enc(merchantId)}`); }
 }
 const enc = encodeURIComponent;
 function need(id: string) { if (!id || typeof id !== 'string') throw new Error('PayPal-Request-Id is required on money calls'); return id; }
