@@ -33,7 +33,7 @@ const T = {
     waitingProof: 'Waiting for the provider to upload proof.', waitingReview: 'Proof uploaded. Waiting for the reviewer to verify.', verifiedBy: 'Verified by', proofToApprove: 'Proof you are approving', sha: 'Proof sha256', approve: 'Approve and release this payment', approveHelp: 'Your approval is bound to this exact proof file. If the file changes, the approval is refused.',
     reject: 'Reject (void the hold)', reason: 'Reason', captured: 'Collected', capture: 'Capture id', voided: 'Hold voided; nothing was collected.', expired: 'Hold expired.',
     aiCheck: 'AI proof check (advisory only)', aiNever: 'Advisory only. It never approves or changes the payment. A reviewer verifies and the family approves.', score: 'Score', recommendation: 'Recommendation', checksTitle: 'Checks',
-    rec_recommend_approve: 'Looks consistent: recommend approve', rec_needs_human_review: 'Needs human review', rec_recommend_reject: 'Looks inconsistent: recommend reject', noCheck: 'No AI check result yet.',
+    rec_recommend_approve: 'Looks consistent: recommend approve', rec_needs_human_review: 'Needs human review', rec_recommend_reject: 'Looks inconsistent: recommend reject', noCheck: 'No AI check result yet.', aiRunning: 'AI proof check is running… this page refreshes by itself. (Advisory only.)',
     upload: 'Upload proof', file: 'Proof image (PNG/JPEG/WebP)', note: 'Note (optional)', useSample: 'Use the synthetic sample receipt', submit: 'Submit proof', submitted: 'Proof submitted.',
     verifyBtn: 'Mark proof verified (not an approval)', verifyHelp: 'You verify; only the family can approve and release funds.', verifyNote: 'Reviewer note (optional)',
     onboarding: 'Start PayPal seller onboarding', onbDone: 'Onboarding link (real PayPal sandbox call)', onbSim: 'Labeled SIMULATED fallback',
@@ -60,7 +60,7 @@ const T = {
     waitingProof: 'Esperando que el proveedor suba la prueba.', waitingReview: 'Prueba subida. Esperando la verificación del revisor.', verifiedBy: 'Verificado por', proofToApprove: 'Prueba que usted aprueba', sha: 'sha256 de la prueba', approve: 'Aprobar y liberar este pago', approveHelp: 'Su aprobación queda ligada a este archivo exacto. Si el archivo cambia, se rechaza la aprobación.',
     reject: 'Rechazar (anular la retención)', reason: 'Motivo', captured: 'Cobrado', capture: 'Id de captura', voided: 'Retención anulada; no se cobró nada.', expired: 'La retención venció.',
     aiCheck: 'Verificación de la prueba por IA (solo orientativa)', aiNever: 'Solo orientativa. Nunca aprueba ni cambia el pago. Un revisor verifica y la familia aprueba.', score: 'Puntuación', recommendation: 'Recomendación', checksTitle: 'Verificaciones',
-    rec_recommend_approve: 'Parece coherente: se recomienda aprobar', rec_needs_human_review: 'Requiere revisión humana', rec_recommend_reject: 'Parece incoherente: se recomienda rechazar', noCheck: 'Aún no hay resultado de la IA.',
+    rec_recommend_approve: 'Parece coherente: se recomienda aprobar', rec_needs_human_review: 'Requiere revisión humana', rec_recommend_reject: 'Parece incoherente: se recomienda rechazar', noCheck: 'Aún no hay resultado de la IA.', aiRunning: 'La verificación por IA está en curso… esta página se actualiza sola. (Solo orientativa.)',
     upload: 'Subir prueba', file: 'Imagen de la prueba (PNG/JPEG/WebP)', note: 'Nota (opcional)', useSample: 'Usar el recibo de muestra sintético', submit: 'Enviar prueba', submitted: 'Prueba enviada.',
     verifyBtn: 'Marcar prueba como verificada (no es una aprobación)', verifyHelp: 'Usted verifica; solo la familia puede aprobar y liberar los fondos.', verifyNote: 'Nota del revisor (opcional)',
     onboarding: 'Iniciar incorporación de vendedor en PayPal', onbDone: 'Enlace de incorporación (llamada real al sandbox de PayPal)', onbSim: 'Alternativa SIMULADA y rotulada',
@@ -143,11 +143,13 @@ async function payeePanel(providerId, casePayee) {
 }
 
 // ------------------------------------------------------------------ AI check box
+let refreshTimer = null;
 function aiBox(v) {
   if (!v) return h('p', { class: 'muted small' }, t('noCheck'));
+  if (v.status === 'running' || v.status === 'pending' || v.status === 'queued') { clearTimeout(refreshTimer); refreshTimer = setTimeout(() => render(), 4000); return h('div', { 'data-testid': 'ai-check-running', class: 'notice n-info' }, t('aiRunning')); }
   const rows = (v.checks || []).map((c) => h('li', {}, badge(c.status), ' ', h('b', {}, (CHECK_NAMES[c.id] || [c.id, c.id])[lang === 'es' ? 1 : 0]), ': ', L(c, 'reason')));
   return h('div', { 'data-testid': 'ai-check' }, h('h3', {}, t('aiCheck')), h('div', { class: 'notice n-info small' }, t('aiNever')),
-    h('p', {}, `${t('score')}: ${v.score ?? '—'} · ${t('recommendation')}: `, h('b', {}, t('rec_' + v.recommendation) || v.recommendation || '—')),
+    h('p', {}, `${t('score')}: ${v.score ?? '—'} · ${t('recommendation')}: `, h('b', {}, T[lang]['rec_' + v.recommendation] || v.recommendation || '—')),
     v.explanation ? h('p', { class: 'small' }, lang === 'es' ? v.explanation.summary_es : v.explanation.summary_en) : null,
     h('ul', { class: 'clean' }, rows), v.error ? h('p', { class: 'small muted' }, 'error: ' + v.error) : null);
 }
@@ -339,6 +341,7 @@ function loginView(rerender) {
 
 // ------------------------------------------------------------------ shell
 async function render() {
+  clearTimeout(refreshTimer);
   document.documentElement.lang = lang;
   $('#brandSub').textContent = `${t('tagline')} · ${t('featured')}`;
   $('#disclaimer').innerHTML = T[lang].disclaimer; // static, trusted strings only
