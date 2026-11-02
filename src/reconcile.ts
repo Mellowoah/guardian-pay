@@ -2,6 +2,8 @@ import type pg from 'pg';
 import type { Db } from './db.js';
 import { audit } from './audit.js';
 import { HOLDING } from './state.js';
+import type { PayeeService } from './payee/service.js';
+import { PAYEE_EVENT_TYPES } from './payee/service.js';
 import { loadMilestone, loadPayment, transition, forceState, updatePayment, type MilestoneRow, type PaymentRow } from './repo.js';
 
 export const RECONCILED_TYPES = ['PAYMENT.CAPTURE.COMPLETED', 'PAYMENT.CAPTURE.DECLINED', 'PAYMENT.CAPTURE.DENIED', 'PAYMENT.AUTHORIZATION.VOIDED'];
@@ -49,11 +51,16 @@ export function decide(type: string, rid: string, m: Pick<MilestoneRow, 'state'>
 const matchSql = `SELECT milestone_id FROM payments WHERE capture_id = $1 OR current_authorization_id = $2 OR original_authorization_id = $2
                   OR paypal_order_id = $3 OR milestone_id::text = $4 LIMIT 1`;
 
-export async function reconcileEvent(db: Db, eventId: string, now = new Date()): Promise<ReconcileResult> {
+export async function reconcileEvent(db: Db, eventId: string, now = new Date(), payee?: PayeeService): Promise<ReconcileResult> {
   const ev = (await db.query('SELECT paypal_event_id, event_type, verified, payload, received_at, processed_at FROM webhook_events WHERE paypal_event_id = $1', [eventId])).rows[0];
   if (!ev) return { event_id: eventId, outcome: 'skipped', note: 'unknown event' };
   if (ev.processed_at) return { event_id: eventId, outcome: 'skipped', note: 'already processed' };
   const done = async (c: { query: (t: string, p?: any[]) => Promise<unknown> }, note: string) => { await c.query('UPDATE webhook_events SET processed_at = now(), reconcile_note = $2 WHERE paypal_event_id = $1', [eventId, note]); };
+  if (ev.verified && payee && PAYEE_EVENT_TYPES.includes(ev.event_type)) {
+    const note = await payee.handleWebhook(ev.event_type, ev.payload);
+    await done(db, note);
+    return { event_id: eventId, outcome: note === 'ignored' || note === 'no matching provider' ? 'ignored' : 'applied', note };
+  }
   if (!ev.verified || !RECONCILED_TYPES.includes(ev.event_type)) { await done(db, ev.verified ? 'type not reconciled' : 'unverified'); return { event_id: eventId, outcome: 'ignored', note: 'not reconciled' }; }
 
   const r = ev.payload?.resource ?? {};
@@ -105,9 +112,9 @@ export async function reconcileEvent(db: Db, eventId: string, now = new Date()):
 }
 
 /** Re-process verified-but-unprocessed events (a webhook can race our own API call, or the process may have restarted mid-way). */
-export async function reconcilePending(db: Db, now = new Date()): Promise<ReconcileResult[]> {
-  const { rows } = await db.query(`SELECT paypal_event_id FROM webhook_events WHERE processed_at IS NULL AND verified AND event_type = ANY($1) ORDER BY id LIMIT 100`, [RECONCILED_TYPES]);
+export async function reconcilePending(db: Db, now = new Date(), payee?: PayeeService): Promise<ReconcileResult[]> {
+  const { rows } = await db.query(`SELECT paypal_event_id FROM webhook_events WHERE processed_at IS NULL AND verified AND event_type = ANY($1) ORDER BY id LIMIT 100`, [payee ? [...RECONCILED_TYPES, ...PAYEE_EVENT_TYPES] : RECONCILED_TYPES]);
   const out: ReconcileResult[] = [];
-  for (const r of rows) { try { out.push(await reconcileEvent(db, r.paypal_event_id, now)); } catch (e) { console.error('reconcile error', r.paypal_event_id, (e as Error).message); } }
+  for (const r of rows) { try { out.push(await reconcileEvent(db, r.paypal_event_id, now, payee)); } catch (e) { console.error('reconcile error', r.paypal_event_id, (e as Error).message); } }
   return out;
 }

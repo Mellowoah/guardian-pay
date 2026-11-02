@@ -9,10 +9,33 @@ import { type Actor } from './guard.js';
 import { lifecycleTick } from './lifecycle.js';
 import { reconcilePending } from './reconcile.js';
 import type { GuardedPayPal } from './guard.js';
+import type { PayeeService } from './payee/service.js';
 
 const wrap = (fn: express.RequestHandler): express.RequestHandler => (req, res, next) => { Promise.resolve(fn(req, res, next)).catch(next); };
 
-export function buildApi(db: Db, svc: Service, auth: AuthConfig): express.Router {
+/** tiny fixed-window per-IP limiter for the public endpoint (in-memory; fine for one instance) */
+function rateLimit(max: number, windowMs: number): express.RequestHandler {
+  const hits = new Map<string, { n: number; reset: number }>();
+  return (req, res, next) => {
+    const now = Date.now(); const k = req.ip ?? 'x'; let h = hits.get(k);
+    if (!h || now >= h.reset) { h = { n: 0, reset: now + windowMs }; hits.set(k, h); if (hits.size > 5000) for (const [kk, v] of hits) if (now >= v.reset) hits.delete(kk); }
+    if (++h.n > max) { res.set('Retry-After', String(Math.ceil((h.reset - now) / 1000))).status(429).json({ error: 'rate_limited' }); return; }
+    next();
+  };
+}
+
+/** PUBLIC (no login): anyone — including a family before they pay — can see whether a provider's payee checks pass. Read-only, rate limited, no personal data beyond the public registry fields. */
+export function buildPublicApi(payee: PayeeService): express.Router {
+  const r = express.Router();
+  r.get('/:providerId', rateLimit(60, 60_000), wrap(async (req, res) => {
+    if (!/^\d{1,9}$/.test(req.params.providerId)) throw new HttpError(404, 'not_found', 'provider not found');
+    res.set('Cache-Control', 'no-store').json(await payee.publicVerify(Number(req.params.providerId)));
+  }));
+  r.use(errorHandler);
+  return r;
+}
+
+export function buildApi(db: Db, svc: Service, auth: AuthConfig, payee: PayeeService): express.Router {
   const r = express.Router();
   r.use(wrap(userAuth(db, auth)));
   const a = (req: express.Request) => req.actor!;
@@ -31,6 +54,13 @@ export function buildApi(db: Db, svc: Service, auth: AuthConfig): express.Router
   }));
   r.post('/cases', only('provider'), wrap(async (req, res) => { res.status(201).json(await svc.createCase(a(req), req.body)); }));
   r.get('/cases/:id', wrap(async (req, res) => { res.json(await svc.getCase(a(req), req.params.id)); }));
+  r.get('/cases/:id/payee', wrap(async (req, res) => { res.json(await svc.casePayee(a(req), req.params.id)); }));
+  r.post('/cases/:id/payee-change', only('provider'), wrap(async (req, res) => { res.status(201).json(await payee.requestChange(a(req), req.params.id, req.body?.new_merchant_id)); }));
+  r.post('/cases/:id/payee-change/approve', only('family'), wrap(async (req, res) => { res.json(await payee.approveChange(a(req), req.params.id)); }));
+  r.post('/cases/:id/payee-change/cancel', only('provider', 'family'), wrap(async (req, res) => { res.json(await payee.cancelChange(a(req), req.params.id)); }));
+  r.post('/cases/:id/payee-change/apply', only('provider', 'family'), wrap(async (req, res) => { res.json(await payee.applyChange(a(req), req.params.id)); }));
+  r.post('/provider/onboarding', only('provider'), wrap(async (req, res) => { res.status(201).json(await payee.startOnboarding(a(req))); }));
+  r.post('/verify-payee', only('provider', 'reviewer'), wrap(async (req, res) => { res.json(await payee.verifyMerchant(a(req), Number(req.body?.provider_id), req.body?.merchant_id)); }));
   r.get('/cases/:id/audit', wrap(async (req, res) => { res.json(await svc.getAudit(a(req), req.params.id)); }));
   r.post('/milestones/:id/order', only('family'), wrap(async (req, res) => { res.status(201).json(await svc.openOrder(a(req), req.params.id, req.body)); }));
   r.post('/milestones/:id/authorize', only('family'), wrap(async (req, res) => { res.json(await svc.authorizeWallet(a(req), req.params.id)); }));

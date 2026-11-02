@@ -6,6 +6,7 @@ import { audit } from './audit.js';
 import type { Verifier } from './verify/verifier.js';
 import { sniffImage } from './verify/extraction.js';
 import { addDays } from './clock.js';
+import type { PayeeService } from './payee/service.js';
 import { HOLDING } from './state.js';
 import { HttpError, loadMilestone, loadPayment, transition, updatePayment, actorLabel, attemptOf, bumped, mNow, caseNow, type MilestoneRow, type PaymentRow } from './repo.js';
 
@@ -18,7 +19,7 @@ const SHA_RE = /^[0-9a-f]{64}$/;
 const SANDBOX_CARD = { number: '4111111111111111', expiry: '2030-12', security_code: '123', name: 'Demo Buyer (sandbox)',
   billing_address: { address_line_1: '123 Main St', admin_area_2: 'San Jose', admin_area_1: 'CA', postal_code: '95131', country_code: 'US' } };
 
-export interface ServiceOpts { publicBaseUrl: string; allowSandboxCard: boolean; verifier?: Verifier }
+export interface ServiceOpts { publicBaseUrl: string; allowSandboxCard: boolean; verifier?: Verifier; payee: PayeeService }
 export const MAX_PROOF_BYTES = 5 * 1024 * 1024;
 const DOC_TYPES = ['receipt_notice', 'rfe_response', 'interview_notice'];
 
@@ -56,6 +57,7 @@ export class Service {
       if (!fam) throw new HttpError(400, 'bad_request', 'unknown family_username');
       const cs = (await c.query('INSERT INTO cases (title, description, provider_id, family_user_id, beneficiary_name, case_type) VALUES ($1,$2,$3,$4,$5,$6) RETURNING *',
         [title, description || null, prov.id, fam.id, beneficiary, caseType])).rows[0];
+      await this.opts.payee.bindForNewCase(c, cs.id, prov.id, actorLabel(actor));
       await audit(c, { actor: actorLabel(actor), action: 'case.create', targetType: 'case', targetId: cs.id, caseId: cs.id, before: null, after: { title, milestones: items.length } });
       const out = [];
       for (let i = 0; i < items.length; i++) {
@@ -81,8 +83,11 @@ export class Service {
     const ms = (await this.db.query(
       `SELECT m.*, (SELECT username FROM users WHERE id = m.verified_by) AS verified_by_name, (SELECT username FROM users WHERE id = m.approved_by) AS approved_by_name,
               row_to_json(p) AS payment FROM milestones m LEFT JOIN payments p ON p.milestone_id = m.id WHERE m.case_id = $1 ORDER BY m.seq`, [caseId])).rows;
-    return { id: cs.id, title: cs.title, currency: cs.currency, beneficiary_name: cs.beneficiary_name, case_type: cs.case_type, milestones: ms.map(m => ({ ...publicMilestone(m), payment: m.payment ? publicPayment(m.payment) : null })) };
+    const payee = await this.opts.payee.getCasePayee(caseId);
+    return { id: cs.id, title: cs.title, currency: cs.currency, beneficiary_name: cs.beneficiary_name, case_type: cs.case_type, payee, milestones: ms.map(m => ({ ...publicMilestone(m), payment: m.payment ? publicPayment(m.payment) : null })) };
   }
+
+  async casePayee(actor: Actor, caseId: string) { await this.assertCaseAccess(actor, caseId); return this.opts.payee.getCasePayee(caseId); }
 
   async getAudit(actor: Actor, caseId: string) {
     await this.assertCaseAccess(actor, caseId);
@@ -141,6 +146,7 @@ export class Service {
     const useCard = body?.payment_source === 'card';
     if (useCard && !this.opts.allowSandboxCard) throw new HttpError(400, 'bad_request', 'sandbox card disabled');
     if (body?.payment_source && !['card', 'paypal'].includes(body.payment_source)) throw new HttpError(400, 'bad_request', 'payment_source must be card or paypal');
+    { const m0 = await loadMilestone(this.db.pool, milestoneId); assertCaseFamily(actor, m0, 'fund a milestone'); await this.opts.payee.ensureFundable(m0.case_id); }
     const pre = await this.db.tx(async c => {
       const m = await loadMilestone(c, milestoneId, true);
       assertCaseFamily(actor, m, 'fund a milestone');
@@ -148,8 +154,10 @@ export class Service {
       if (m.state !== 'created') throw new HttpError(409, 'conflict', `milestone is ${m.state}`);
       if (p?.status === 'order_created') { if (useCard) throw new HttpError(409, 'conflict', 'a PayPal-wallet order already exists for this milestone'); return { m, p, existing: true }; }
       if (p && p.status !== 'pending_order') throw new HttpError(409, 'conflict', `payment is ${p.status}`);
+      if (p) await this.opts.payee.stampPayment(c, p.id, m.case_id);
       if (!p) {
         p = (await c.query('INSERT INTO payments (milestone_id, amount, currency) VALUES ($1,$2,$3) RETURNING *', [m.id, m.amount, m.currency])).rows[0];
+        await this.opts.payee.stampPayment(c, p!.id, m.case_id); p = (await loadPayment(c, m.id))!;
         await audit(c, { actor: actorLabel(actor), action: 'payment.create', targetType: 'payment', targetId: p!.id, caseId: m.case_id, before: null, after: { status: 'pending_order', amount: m.amount } });
       }
       return { m, p: p!, existing: false };
@@ -181,6 +189,7 @@ export class Service {
   }
 
   async authorizeWallet(actor: Actor, milestoneId: string): Promise<any> {
+    { const m0 = await loadMilestone(this.db.pool, milestoneId); assertCaseFamily(actor, m0, 'authorize a milestone'); await this.opts.payee.ensureFundable(m0.case_id); }
     const pre = await this.db.tx(async c => {
       const m = await loadMilestone(c, milestoneId, true); const p = await loadPayment(c, m.id);
       assertCaseFamily(actor, m, 'authorize a milestone');
@@ -304,6 +313,7 @@ export class Service {
     const seen = typeof body?.proof_sha256 === 'string' ? body.proof_sha256.toLowerCase() : '';
     if (!SHA_RE.test(seen)) throw new HttpError(400, 'bad_request', 'proof_sha256 is required: approve the proof you were shown (GET /api/milestones/:id/proof)');
     const seenId = typeof body?.proof_id === 'string' ? body.proof_id : null;
+    { const m0 = await loadMilestone(this.db.pool, milestoneId); assertCaseFamily(actor, m0, 'approve a milestone'); if (m0.state === 'verified') await this.opts.payee.ensureFundable(m0.case_id); }
     const pre = await this.db.tx(async c => {
       const m = await loadMilestone(c, milestoneId, true); const p = await loadPayment(c, m.id);
       assertCaseFamily(actor, m, 'approve a milestone');

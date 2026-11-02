@@ -134,7 +134,7 @@ describe('proof image endpoint + proof metadata', opts, () => {
   });
   test('HTTP: headers are inert, auth is enforced', async () => {
     const f = await fundedMilestone(e); await e.svc.submitProof(e.provider, f.id, { file_base64: fx('forged_subtle').toString('base64') });
-    const srv = createApp({ store: new MemoryStore(), api: buildApi(e.db, e.svc, TEST_AUTH) }).listen(0); const base = `http://127.0.0.1:${(srv.address() as AddressInfo).port}`;
+    const srv = createApp({ store: new MemoryStore(), api: buildApi(e.db, e.svc, TEST_AUTH, e.payee) }).listen(0); const base = `http://127.0.0.1:${(srv.address() as AddressInfo).port}`;
     try {
       assert.equal((await fetch(`${base}/api/milestones/${f.id}/proof/image`)).status, 401);
       assert.equal((await fetch(`${base}/api/milestones/${f.id}/proof/image`, { headers: { authorization: tok('provider_demo') } })).status, 403);
@@ -148,7 +148,7 @@ describe('proof image endpoint + proof metadata', opts, () => {
 
 describe('auth tokens and role checks', opts, () => {
   let e: Env; let srv: ReturnType<ReturnType<typeof createApp>['listen']>; let base = '';
-  before(async () => { e = await setup(); srv = createApp({ store: new MemoryStore(), api: buildApi(e.db, e.svc, TEST_AUTH) }).listen(0); base = `http://127.0.0.1:${(srv.address() as AddressInfo).port}`; });
+  before(async () => { e = await setup(); srv = createApp({ store: new MemoryStore(), api: buildApi(e.db, e.svc, TEST_AUTH, e.payee) }).listen(0); base = `http://127.0.0.1:${(srv.address() as AddressInfo).port}`; });
   after(async () => { srv.close(); await e.close(); });
   const get = (path: string, auth?: string) => fetch(base + path, { headers: auth ? { authorization: auth } : {} });
 
@@ -166,7 +166,7 @@ describe('auth tokens and role checks', opts, () => {
     const long = 'gp_' + 'q'.repeat(40);
     const cfg = authConfigFromEnv({ GP_TOKEN_SECRET: 'test-secret-0123456789abcdef', GP_TOKEN_FAMILY_DEMO: long, GP_TOKEN_PROVIDER_DEMO: 'tooshort' });
     assert.equal(tokenFor(cfg, 'family_demo'), long); assert.equal(tokenFor(cfg, 'provider_demo'), deriveToken('test-secret-0123456789abcdef', 'provider_demo'));
-    const s2 = createApp({ store: new MemoryStore(), api: buildApi(e.db, e.svc, cfg) }).listen(0); const b2 = `http://127.0.0.1:${(s2.address() as AddressInfo).port}`;
+    const s2 = createApp({ store: new MemoryStore(), api: buildApi(e.db, e.svc, cfg, e.payee) }).listen(0); const b2 = `http://127.0.0.1:${(s2.address() as AddressInfo).port}`;
     try {
       assert.equal((await fetch(b2 + '/api/me', { headers: { authorization: 'Bearer ' + long } })).status, 200);
       assert.equal((await fetch(b2 + '/api/me', { headers: { authorization: tok('family_demo') } })).status, 401); // derived token no longer accepted for that user
@@ -198,7 +198,7 @@ describe('admin routes: off by default, admin token, per-case audited clock', op
   const serveWith = (enable: boolean) => {
     const cfg = authConfigFromEnv({ GP_TOKEN_SECRET: 'test-secret-0123456789abcdef', ENABLE_ADMIN_ROUTES: String(enable) });
     const admin = enable ? { gate: adminAuth(cfg), router: buildAdminApi(e.db, e.svc, e.guarded, cfg) } : undefined;
-    const srv = createApp({ store: new MemoryStore(), api: buildApi(e.db, e.svc, cfg), admin }).listen(0);
+    const srv = createApp({ store: new MemoryStore(), api: buildApi(e.db, e.svc, cfg, e.payee), admin }).listen(0);
     return { cfg, srv, base: `http://127.0.0.1:${(srv.address() as AddressInfo).port}` };
   };
   test('disabled by default: admin and debug routes are not mounted (404/401 even with a valid user token)', async () => {

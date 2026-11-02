@@ -2,7 +2,7 @@
 
 Guardian Pay is the trust layer that lets AI-driven commerce scale safely on PayPal. **The AI suggests, a human decides, PayPal moves the money.** No code path captures funds without a recorded human approval.
 
-Hackathon demo on the PayPal **sandbox**: milestone-based payments (funds are authorized up front and captured only after a human approves) built on Orders v2 `intent=AUTHORIZE`, with a guard module, append-only audit log, idempotent money calls, a 29-day authorization lifecycle and webhook reconciliation.
+Hackathon demo on the PayPal **sandbox**: milestone-based payments (funds are authorized up front and captured only after a human approves, to a payee that passed PayPal's checks and the public practitioner lists) built on Orders v2 `intent=AUTHORIZE`, with a guard module, append-only audit log, idempotent money calls, a 29-day authorization lifecycle and webhook reconciliation.
 
 > **Disclaimer:** This is a sandbox demo using synthetic data. It is not legal advice, and it is not a law firm. No live PayPal endpoints are used, and no real money moves.
 
@@ -41,6 +41,30 @@ Design notes
 - Note: the demo clock is per case, admin-only and audited (`admin.clock_set`); it only moves Guardian Pay's own time. A milestone is expired **only when PayPal itself reports the authorization EXPIRED/VOIDED**; if the demo clock says day 30 but PayPal says otherwise, the tick writes `payment.expire_blocked` and changes nothing. A reauthorize inside PayPal's real 3-day honor window is deferred.
 - **Proof reuse:** every uploaded image's sha256 and extracted receipt number go into a registry; the same image or receipt on another case fails the `proof_not_reused` check (no other-case ids are revealed) and goes to human review.
 - **Production safety:** `AI_PROVIDER=fixture` refuses to start when `NODE_ENV=production` or on Render. `ALLOW_SANDBOX_CARD=false` disables the sandbox card path.
+
+## Payee verification (Layer 2)
+Before any money moves, Guardian Pay checks **who is being paid**, with two separate checks that the guard requires together. It **mirrors PayPal's seller checks and public EOIR practitioner lists**; it does not guarantee anyone's identity and is **not a legal determination**.
+
+1. **PayPal ready to receive** (`paypal_ready`): the provider onboards through PayPal seller onboarding (`POST /v2/customer/partner-referrals` with `tracking_id` = provider id). "Verified by PayPal" requires `payments_receivable = true` AND `primary_email_confirmed = true` AND the authorize/capture and refund permissions in `oauth_third_party`. Each result is stored as an append-only snapshot with the time checked (`provider_verifications`). `MERCHANT.ONBOARDING.COMPLETED` binds and re-verifies; `MERCHANT.PARTNER-CONSENT.REVOKED` freezes funds.
+2. **Authorized to practice** (`authorized_to_practice`): either an accredited representative of a **DOJ EOIR recognized organization**, or a licensed attorney, and **not on the EOIR currently-disciplined list**.
+   - EOIR data is a **dated local snapshot** of the public pages (justice.gov, public domain): roster PDFs report date **2026-10-25**; currently disciplined page dated **2026-10-26**; previously disciplined page dated 2026-04-23 (`data/eoir/snapshot.json`, rebuilt by `scripts/build_eoir_snapshot.py`). Re-download before relying on it. Accreditation and recognition expirations are shown; an asterisk means **pending renewal** (valid, flagged). `(DHS only)` accreditation is noted.
+   - A **confirmed** match on the currently-disciplined list (same name AND same state, not reinstated) is a **hard fail**. A possible match (similar name, different or unknown state, similar roster name) is `needs_review`, which blocks funds until a human looks. Reinstated or previously-disciplined entries are informational.
+   - **Attorneys: SIMULATED.** The bar lookup is a labeled fixture (`data/bar/simulated_bar.json`, synthetic `SIM-` numbers). No bar data is scraped or republished; the result links to the official lookup for a manual check: https://www.floridabar.org/directories/find-mbr/.
+   - The demo provider is a **SYNTHETIC** organization and person in `data/eoir/demo_overlay.json` (flagged `synthetic`); it is not on any EOIR list.
+
+**Which PayPal path is live?** Referral creation is a **real** sandbox call (a hosted onboarding link). A real seller status read needs a seller to finish PayPal's hosted onboarding AND `PAYPAL_PARTNER_MERCHANT_ID` to be set; otherwise the status is a PayPal-shaped **SIMULATED** onboarding status, labeled `simulated: true` and "SIMULATED" in every reason and log line (merchant ids `SIMOK...` = ready, `SIMBAD...` = not ready). In simulated mode no payee is sent to PayPal; in live mode the **guard** sets `purchase_units[0].payee.merchant_id` so funds go to the provider, not the platform.
+
+| Endpoint | Who | What |
+|---|---|---|
+| `GET /api/verify-payee/:providerId` | **public**, rate limited | `{verified, checks:[paypal_ready, authorized_to_practice], checked_at, source:"PayPal seller onboarding status", snapshot dates, simulated, ...}`, each check with status, English + Spanish reason, details |
+| `POST /api/verify-payee` | provider (own) / reviewer | `{provider_id, merchant_id}` check a merchant id now |
+| `POST /api/provider/onboarding` | provider | start PayPal seller onboarding; returns the `action_url` |
+| `GET /api/cases/:id/payee` | participants | masked payee binding and any pending change |
+| `POST /api/cases/:id/payee-change`, `/approve`, `/cancel`, `/apply` | provider requests; **family approves**; either cancels; either applies | change the payee |
+
+**Immutable payee binding:** the provider's merchant id is bound to the case at creation and locked by a database trigger. Changing it requires (1) the new merchant to pass **both** checks, (2) **family approval**, (3) a **cooling delay** (`PAYEE_CHANGE_COOLING_HOURS`, default 72, measured on the case's demo clock) and (4) a fresh re-verification at apply time; every step is audited. Funding and capture are frozen while a change is open. The guard denies order, authorize and capture unless the bound payee passed both checks within `PAYEE_VERIFY_MAX_AGE_HOURS` (default 24) and matches the payee stamped on the payment. A void is never blocked.
+
+Env (all optional): `PAYEE_ONBOARDING_MODE` (`auto` | `simulated`), `PAYPAL_PARTNER_MERCHANT_ID` (our partner merchant id, needed for live status reads), `PAYEE_CHANGE_COOLING_HOURS`, `PAYEE_VERIFY_MAX_AGE_HOURS`, `PAYEE_REFRESH_SECONDS` (reuse a snapshot younger than this; default 300).
 
 ## AI proof check (advisory)
 `POST /api/milestones/:id/proof` now takes `{note?, filename?, file_base64?}` (PNG/JPEG/WebP, max 5 MB). It stores the bytes and a sha256, moves the milestone to `proof_submitted`, and starts a background check. `GET /api/milestones/:id/verification` returns the seven checks (pass / fail / not_run, each with an English and a Spanish reason), the score (0..1), the recommendation and an explanation.

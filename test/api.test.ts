@@ -8,7 +8,7 @@ import { buildApi } from '../src/routes.js';
 
 const opts = { skip: TEST_URL ? false : 'DATABASE_URL_TEST not set' };
 let e: Env; let base = ''; let server: ReturnType<ReturnType<typeof createApp>['listen']>;
-before(async () => { if (!TEST_URL) return; e = await setup(); server = createApp({ store: new MemoryStore(), api: buildApi(e.db, e.svc, TEST_AUTH) }).listen(0); base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; });
+before(async () => { if (!TEST_URL) return; e = await setup(); server = createApp({ store: new MemoryStore(), api: buildApi(e.db, e.svc, TEST_AUTH, e.payee) }).listen(0); base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; });
 after(async () => { if (!TEST_URL) return; server.close(); await e.close(); });
 const call = async (user: string | null, method: string, path: string, body?: unknown) => {
   const r = await fetch(base + path, { method, headers: { 'content-type': 'application/json', ...(user ? { authorization: tok(user) } : {}) }, body: body ? JSON.stringify(body) : undefined });

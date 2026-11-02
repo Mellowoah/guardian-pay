@@ -71,6 +71,30 @@ async function main() {
   const wallet = await api('family_demo', 'POST', `/api/milestones/${(await api('provider_demo', 'POST', '/api/cases', { title: 'wallet link check (synthetic)', milestones: [{ title: 'w', amount: '1.00' }] })).json.milestones[0].id}/order`, { payment_source: 'paypal' });
   check('wallet path returns a PayPal approve link', wallet.status === 201 && /paypal\.com/.test(wallet.json.approve_url ?? ''), String(wallet.json.approve_url ?? '').split('?')[0]);
 
+  // ---- payee verification (Layer 2): public endpoint, both checks, case binding, funding refusal, change flow
+  const provs: Record<string, any> = {};
+  for (let i = 1; i <= 6; i++) { const r = await raw(null, 'GET', `/api/verify-payee/${i}`); if (r.status === 200) provs[r.json.display_name] = { id: i, ...r.json }; }
+  const demoP = Object.values(provs).find((p: any) => /Guardian Demo Legal Aid/.test(p.display_name)); const twoP = Object.values(provs).find((p: any) => /Maple Legal/.test(p.display_name));
+  check('GET /api/verify-payee/:id is public and returns both checks separately with dates', !!demoP && demoP.verified === true && demoP.checks?.length === 2 && demoP.checks[0].id === 'paypal_ready' && demoP.checks[1].id === 'authorized_to_practice'
+    && demoP.source === 'PayPal seller onboarding status' && !!demoP.checked_at && demoP.snapshot?.eoir_roster_report_date === '2026-10-25' && demoP.snapshot?.eoir_currently_disciplined_page_date === '2026-10-26', demoP ? `verified=${demoP.verified} paypal_mode=${demoP.paypal_mode}` : 'provider not found');
+  check('reasons are bilingual and the simulated parts are labeled SIMULATED', !!demoP && demoP.checks.every((c: any) => c.reason_en && c.reason_es) && demoP.simulated === true && /SIMULATED/.test(demoP.checks[0].reason_en) && /SIMULAD/.test(demoP.checks[0].reason_es) && demoP.checks[1].details.accreditation?.accreditation_expires);
+  check('an unverified provider shows verified=false with both failing reasons', !!twoP && twoP.verified === false && twoP.checks.every((c: any) => c.status === 'fail'));
+  const cs0 = await api('family_demo', 'GET', `/api/cases/${caseId}`);
+  check('case payee is bound at creation, masked, immutable', cs0.json.payee?.immutable === true && /^SIM…\w{3}$/.test(cs0.json.payee?.merchant_id_masked ?? '') && cs0.json.payee?.mode === 'simulated', JSON.stringify(cs0.json.payee));
+  const unv = await api('provider_two', 'POST', '/api/cases', { title: 'Unverified provider check (synthetic)', milestones: [{ title: 'x', amount: '1.00' }] });
+  const unvOrder = await api('family_demo', 'POST', `/api/milestones/${unv.json.milestones?.[0]?.id}/order`, { payment_source: 'card' });
+  check('funding a milestone of an unverified provider is refused (409 payee_not_verified); no PayPal order', unvOrder.status === 409 && unvOrder.json.error === 'payee_not_verified' && unvOrder.json.checks?.length === 2, `status ${unvOrder.status}`);
+  const chg = await api('provider_demo', 'POST', `/api/cases/${caseId}/payee-change`, { new_merchant_id: 'SIMBADLIVE001' });
+  check('payee change to a merchant that fails the checks is refused (409)', chg.status === 409 && chg.json.error === 'payee_not_verified');
+  const chg2 = await api('provider_demo', 'POST', `/api/cases/${caseId}/payee-change`, { new_merchant_id: 'SIMOKLIVE0001' });
+  check('payee change request: pending, cooling delay >= 71h, family must approve', chg2.status === 201 && chg2.json.status === 'pending' && new Date(chg2.json.effective_after).getTime() - Date.now() > 71 * 3600_000);
+  check('provider cannot approve; apply before approval is refused', (await api('provider_demo', 'POST', `/api/cases/${caseId}/payee-change/approve`)).status === 403 && (await api('provider_demo', 'POST', `/api/cases/${caseId}/payee-change/apply`)).status === 409);
+  check('family approves; apply is still blocked by the cooling delay (409)', (await api('family_demo', 'POST', `/api/cases/${caseId}/payee-change/approve`)).status === 200 && (await api('family_demo', 'POST', `/api/cases/${caseId}/payee-change/apply`)).json.error === 'cooling_delay');
+  const cancel = await api('family_demo', 'POST', `/api/cases/${caseId}/payee-change/cancel`);
+  check('change cancelled; binding unchanged; the change steps are audited', cancel.status === 200 && (await api('family_demo', 'GET', `/api/cases/${caseId}`)).json.payee?.merchant_id_masked === cs0.json.payee?.merchant_id_masked && (await auditOf(caseId)).filter(x => /^payee\./.test(x.action)).length >= 4);
+  const ob = await api('provider_demo', 'POST', '/api/provider/onboarding');
+  check('provider onboarding: REAL PayPal sandbox partner referral link (or labeled simulated fallback)', ob.status === 201 && (ob.json.referral_mode === 'live' ? /paypal\.com/.test(ob.json.action_url ?? '') : ob.json.simulated === true), `referral_mode=${ob.json.referral_mode}`);
+
   // proof for A is a SYNTHETIC image upload (starts the advisory AI check); B and C use a plain note
   // unique bytes per run (random trailer after IEND) so repeated runs do not trip the proof-reuse registry; the first-use check stays meaningful
   const img = Buffer.concat([readFileSync(new URL('../fixtures/proofs/good_receipt_notice.png', import.meta.url)), randomBytes(16)]);

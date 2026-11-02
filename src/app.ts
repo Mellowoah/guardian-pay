@@ -10,11 +10,13 @@ export interface AppDeps {
   onEvent?: (eventId: string, eventType: string) => Promise<void>;
   /** mounts the /api router (needs a database) */
   api?: import('express').Router;
+  /** public, unauthenticated payee verification (GET /api/verify-payee/:providerId); mounted before the authenticated /api router */
+  publicApi?: import('express').Router;
   /** admin surface (only when ENABLE_ADMIN_ROUTES=true): `gate` is the admin-token check; `router` is mounted at /api/admin */
   admin?: { gate: import('express').RequestHandler; router?: import('express').Router };
 }
 
-export function createApp({ store, verify, onEvent, api, admin }: AppDeps) {
+export function createApp({ store, verify, onEvent, api, admin, publicApi }: AppDeps) {
   const app = express();
   app.disable('x-powered-by');
   app.set('trust proxy', 1);
@@ -46,6 +48,7 @@ export function createApp({ store, verify, onEvent, api, admin }: AppDeps) {
     });
     if (admin.router) app.use('/api/admin', admin.router);
   }
+  if (publicApi) app.use('/api/verify-payee', publicApi);
   if (api) app.use('/api', api);
   app.get('/paypal/return', (_req, res) => { res.type('text').send('Approved in the PayPal sandbox. You can close this tab and call POST /api/milestones/:id/authorize.'); });
   app.get('/paypal/cancel', (_req, res) => { res.type('text').send('Cancelled in the PayPal sandbox.'); });

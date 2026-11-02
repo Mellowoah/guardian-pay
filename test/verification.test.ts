@@ -144,7 +144,7 @@ describe('db: AI down or flaky', opts, () => {
 describe('http: proof upload + verification endpoints', opts, () => {
   test('POST proof (base64 image) then GET verification over HTTP', async () => {
     const { createApp } = await import('../src/app.js'); const { MemoryStore } = await import('../src/store.js'); const { buildApi } = await import('../src/routes.js');
-    const e = await setup(fixtureExtractor); const srv = createApp({ store: new MemoryStore(), api: buildApi(e.db, e.svc, TEST_AUTH) }).listen(0);
+    const e = await setup(fixtureExtractor); const srv = createApp({ store: new MemoryStore(), api: buildApi(e.db, e.svc, TEST_AUTH, e.payee) }).listen(0);
     const base = `http://127.0.0.1:${(srv.address() as any).port}`;
     const call = async (u: string | null, m: string, p: string, b?: unknown) => { const r = await fetch(base + p, { method: m, headers: { 'content-type': 'application/json', ...(u ? { authorization: tok(u) } : {}) }, body: b ? JSON.stringify(b) : undefined }); return { status: r.status, json: (await r.json()) as any }; };
     try {

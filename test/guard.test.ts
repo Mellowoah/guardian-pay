@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readdirSync, readFileSync } from 'node:fs';
-import { checkMandate, GuardedPayPal, GuardDenied, type Actor, type GuardAction } from '../src/guard.js';
+import { checkMandate, NO_PAYEE, type PayeeFacts, GuardedPayPal, GuardDenied, type Actor, type GuardAction } from '../src/guard.js';
 import { PayPalClient } from '../src/paypal.js';
 
 const M = '123e4567-e89b-12d3-a456-426614174000';
@@ -9,7 +9,8 @@ const SHA = 'a'.repeat(64);
 const family: Actor = { userId: 1, role: 'family', label: 'family_demo' };
 const provider: Actor = { userId: 2, role: 'provider', label: 'provider_demo' };
 const reviewer: Actor = { userId: 4, role: 'reviewer', label: 'reviewer_demo' };
-const facts = { familyUserId: 1, verifiedBy: 4, verifiedProofSha: SHA, currentProofSha: SHA, disputed: false };
+const GOOD_PAYEE: PayeeFacts = { merchantId: 'SIMOKDEMO0001', mode: 'live', verified: true, fresh: true, changePending: false, paymentMerchantId: 'SIMOKDEMO0001' };
+const facts = { familyUserId: 1, verifiedBy: 4, verifiedProofSha: SHA, currentProofSha: SHA, disputed: false, payee: GOOD_PAYEE };
 const base = (o: Partial<GuardAction>): GuardAction => ({ type: 'capture', amount: '10.00', actor: family,
   milestone: { id: M, state: 'verified', providerUserId: 2 }, approvals: [], facts, ...o });
 const approve = { decision: 'approve' as const, user_id: 1, role: 'family', proof_sha256: SHA };
@@ -62,16 +63,18 @@ test('guard: void needs state rejected and a human rejection (case family or rev
 });
 
 // --- bypass attempts through GuardedPayPal never reach PayPal ---
-function harness(approvalRows: any[]) {
+function harness(approvalRows: any[], row: Record<string, unknown> = {}) {
+  const bodies: any[] = [];
   const calls: string[] = [];
   const f = (async (u: string, init: any) => {
     if (String(u).endsWith('/v1/oauth2/token')) return new Response(JSON.stringify({ access_token: 't', expires_in: 3600 }));
-    calls.push(`${init.method} ${u}`); return new Response('{}', { status: 201 });
+    calls.push(`${init.method} ${u}`); if (init.body) bodies.push(JSON.parse(init.body)); return new Response('{}', { status: 201 });
   }) as typeof fetch;
   const client = new PayPalClient({ base: 'https://api-m.sandbox.paypal.com', clientId: 'a', clientSecret: 'b' }, f);
   const gp = new GuardedPayPal(client, { query: (async (sql: string) => ({ rows: /FROM milestones m/.test(sql)
-    ? [{ family_user_id: 1, verified_by: 4, verified_proof_sha256: SHA, current_proof_sha: SHA, disputed_at: null }] : approvalRows })) as any });
-  return { calls, gp };
+    ? [{ family_user_id: 1, verified_by: 4, verified_proof_sha256: SHA, current_proof_sha: SHA, disputed_at: null,
+      payee_merchant_id: 'LIVEMERCH0001', payee_mode: 'live', payment_merchant_id: 'LIVEMERCH0001', pv_ok: true, pv_fresh: true, change_pending: false, ...row }] : approvalRows })) as any });
+  return { calls, gp, bodies };
 }
 const ctx = (o: any = {}) => ({ actor: family, milestone: { id: M, state: 'verified' as const, providerUserId: 2 }, amount: '10.00', attempt: 1, ...o });
 
@@ -106,4 +109,40 @@ test('STATIC: money methods are only referenced from guard.ts and paypal.ts', ()
     if (re.test(readFileSync(new URL('../src/' + f, import.meta.url), 'utf8'))) bad.push(f);
   }
   assert.deepEqual(bad, []);
+});
+
+test('guard: payee - funding and capture need a bound, verified, fresh payee that matches the payment; void/reauthorize do not', () => {
+  const deny = (payee: Partial<PayeeFacts>, type: GuardAction['type'] = 'capture') => checkMandate(base({ type, approvals: [approve], facts: { ...facts, payee: { ...GOOD_PAYEE, ...payee } } }));
+  for (const type of ['order', 'authorize', 'capture'] as const) {
+    assert.equal(deny({}, type).allow, true);
+    assert.equal(deny({ merchantId: null, paymentMerchantId: null }, type).allow, false, 'unbound');
+    assert.equal(deny({ verified: false }, type).allow, false, 'not verified (either check failing)');
+    assert.equal(deny({ fresh: false }, type).allow, false, 'stale verification');
+    assert.equal(deny({ changePending: true }, type).allow, false, 'payee change pending');
+    assert.equal(deny({ paymentMerchantId: 'OTHER000001' }, type).allow, false, 'payment created for another payee');
+    assert.equal(deny({ paymentMerchantId: null }, type).allow, false);
+  }
+  assert.equal(checkMandate(base({ approvals: [approve] }), { allowSimulatedPayee: false }).allow, true);
+  assert.equal(checkMandate(base({ approvals: [approve], facts: { ...facts, payee: { ...GOOD_PAYEE, mode: 'simulated' as const } } }), { allowSimulatedPayee: false }).allow, false);
+  const rej = { decision: 'reject' as const, user_id: 4, role: 'reviewer', proof_sha256: SHA };
+  assert.equal(checkMandate(base({ type: 'void', actor: reviewer, milestone: { id: M, state: 'rejected', providerUserId: 2 }, approvals: [rej], facts: { ...facts, payee: NO_PAYEE } })).allow, true, 'a void is never blocked by payee state');
+  assert.equal(checkMandate(base({ type: 'reauthorize', actor: { userId: null, role: 'system', label: 's' }, milestone: { id: M, state: 'authorized', providerUserId: 2 }, facts: { ...facts, payee: NO_PAYEE } })).allow, true);
+});
+
+test('BYPASS: no bound/verified payee means capture and order never reach PayPal', async () => {
+  for (const row of [{ payee_merchant_id: null, payment_merchant_id: null }, { pv_ok: false }, { pv_fresh: false }, { change_pending: true }, { payment_merchant_id: 'OTHERMERCH001' }]) {
+    const h = harness([approve], row);
+    await assert.rejects(() => h.gp.capture(ctx(), 'A', 'USD'), (e: any) => e instanceof GuardDenied && /payee/.test(e.reason));
+    await assert.rejects(() => h.gp.order(ctx({ milestone: { id: M, state: 'created', providerUserId: 2 } }), { purchase_units: [{ amount: { currency_code: 'USD', value: '10.00' } }] }), GuardDenied);
+    assert.equal(h.calls.length, 0);
+  }
+});
+test('payee: the guard sets purchase_units[0].payee.merchant_id itself (live) - a caller-supplied payee is overwritten; simulated sends none', async () => {
+  const mk = { milestone: { id: M, state: 'created' as const, providerUserId: 2 } };
+  let h = harness([], {});
+  await h.gp.order(ctx(mk), { intent: 'AUTHORIZE', purchase_units: [{ amount: { value: '10.00' }, payee: { merchant_id: 'ATTACKER00001' } }] });
+  assert.deepEqual(h.bodies[0].purchase_units[0].payee, { merchant_id: 'LIVEMERCH0001' });
+  h = harness([], { payee_mode: 'simulated', payee_merchant_id: 'SIMOKDEMO0001', payment_merchant_id: 'SIMOKDEMO0001' });
+  await h.gp.order(ctx(mk), { intent: 'AUTHORIZE', purchase_units: [{ amount: { value: '10.00' }, payee: { merchant_id: 'ATTACKER00001' } }] });
+  assert.equal(h.bodies[0].purchase_units[0].payee, undefined);
 });
